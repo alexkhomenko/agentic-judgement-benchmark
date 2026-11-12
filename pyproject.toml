@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archdecisionbench"
+version = "0.1.0"
+description = "ArchDecisionBench harness: native cloud and local LLM architecture-decision evaluation"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    "anthropic>=2.8,<3",
+    "openai>=3.49,<4",
+    "httpx2>=2.16,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "mypy>=1.10", "types-PyYAML"]
+
+[project.scripts]
+bench = "archbench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

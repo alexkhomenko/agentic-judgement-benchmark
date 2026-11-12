@@ -1,0 +1,14 @@
+temp/
+.venv/
+results/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+# local credentials: never commit
+secrets.local.yaml
+*.local.yaml
+.env
+.env.*
+# reviewer working files (imported copies live under results/)
+reviews/
