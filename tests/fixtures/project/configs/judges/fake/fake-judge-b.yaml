@@ -1,0 +1,16 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Harness-only fake judge from a different (fake) family.
+configuration_id: fake-judge-b
+revision: 1
+track: fake
+adapter: fake-judge
+provider: harness-judge-b
+model: fake-judge-model-b
+profile: judge
+context_limit: 65536
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 4000
+    source: harness default for fake judge
+adapter_options: {}

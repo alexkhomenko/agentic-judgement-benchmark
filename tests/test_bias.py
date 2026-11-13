@@ -208,7 +208,7 @@ def test_self_preference_is_measured_against_other_vendors(env: Env) -> None:
     assert float(summary["openai-like@1"]["own_inclusion_delta"]) == 1.0
     markdown = env.store.read_verified(files["report.md"]).decode()
     assert "## Recommendation bias" in markdown and "+100% vs 0%" in markdown
-    assert "Catalog `agentic-design` revision draft-2 is a **draft**" in markdown
+    assert "Catalog `agentic-design` revision fixture-1 is a **draft**" in markdown
 
 
 def test_without_another_vendor_there_is_no_baseline(env: Env) -> None:

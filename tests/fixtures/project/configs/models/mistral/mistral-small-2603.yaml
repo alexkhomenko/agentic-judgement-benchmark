@@ -1,0 +1,45 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Mistral Small 4 candidate (dated id mistral-small-2603; Apache 2.0 open weights, reasoning-capable):
+# Mistral's current low-cost reasoning tier, the counterpart of Haiku 5.5, GPT-6 Luna, and Gemini
+# Flash-Lite. Pinned to the dated id because Mistral warns aliases update silently. native_recommended
+# profile: provider defaults for reasoning effort and sampling; only max_output_tokens is set. Context and
+# prices are from docs.mistral.ai/models/mistral-small-4-0-26-03 and docs.mistral.ai/inference/pricing,
+# read 2026-11-12.
+configuration_id: mistral-small-2603
+revision: 1
+track: cloud
+adapter: mistral
+provider: mistral
+model: mistral-small-2603
+profile: native_recommended
+context_limit: 256000  # documented "256k"; qualification checks it against max_context_length
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates. Truncation is recorded, never retried.
+  reasoning_effort:
+    state: omitted
+    observed_effective: none
+    source: >-
+      native_recommended uses the provider default. Not stated in the docs; observed live 2026-11-12 as no
+      reasoning (plain-string content, 0 reasoning tokens), unlike the other candidates, which think by
+      default. Set it explicitly (none to high) for reasoning-matched comparisons.
+    verified_on: 2026-11-12
+  temperature:
+    state: omitted
+    source: provider default (the Models API reports default_model_temperature; recorded at qualification)
+  top_p:
+    state: omitted
+    source: provider default
+  seed:
+    state: omitted
+    source: random per invocation
+adapter_options:
+  timeout_s: 600
+  pricing:
+    input_usd_per_mtok: 0.15
+    cached_input_usd_per_mtok: 0.015
+    output_usd_per_mtok: 0.60
+    source: docs.mistral.ai/inference/pricing, read 2026-11-12
+    verified_on: "2026-11-12"

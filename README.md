@@ -65,6 +65,12 @@ python3 -m venv .venv
 .venv/bin/pytest -q && .venv/bin/mypy
 ```
 
+The tests cover the harness code only. Every configuration, rubric, catalog, and scenario they use comes
+from `tests/fixtures/project/`: frozen snapshots of a few configurations, plus synthetic rubrics, catalog,
+prompts, and scenarios. Tests never read the experiment data in `configs/`, `rubrics/`, or `scenarios/`;
+a guard in `tests/conftest.py` fails any test that tries. CI (`.github/workflows/ci.yml`) runs mypy and
+the tests on every pull request and push to `main`.
+
 For the local MLX-LM worker (Apple Silicon), create its pinned environment and fetch the pinned checkpoint:
 
 ```sh

@@ -1,5 +1,7 @@
 # Mergeability check: type-check and the offline test suite on every pull request and push to main.
 # No secrets are used and no paid or live model is called; the suite runs against fakes and mocks.
+# Tests use their own fixtures (tests/fixtures/project); experiment data (configs/, rubrics/, scenarios/)
+# is not part of the tested code.
 # For branch protection, require the single "CI result" check: it passes only when every matrix job passes.
 name: CI
 

@@ -1,0 +1,51 @@
+# TEST FIXTURE: synthetic rubric for the harness tests. Not the benchmark's rubric.
+# The tests rely on its shape: seven dimensions whose weights sum to 100, the last excluded from round 1
+# (so round-1 weights renormalise over 95), architectural_suitability weighted 25, and at least three
+# critical failures.
+rubric_id: personal-workflows
+revision: "fixture-1"
+rating_scale:
+  0: Absent
+  1: Weak
+  2: Partial
+  3: Sound
+  4: Strong
+dimensions:
+  - id: architectural_suitability
+    title: Architectural suitability
+    weight: 25
+  - id: workflow_correctness
+    title: Workflow correctness
+    weight: 20
+  - id: security_and_permissions
+    title: Security and permissions
+    weight: 15
+  - id: reliability_and_recovery
+    title: Reliability and recovery
+    weight: 15
+  - id: simplicity_and_extensibility
+    title: Simplicity and extensibility
+    weight: 10
+  - id: cost_and_operability
+    title: Cost and operability
+    weight: 10
+  - id: reasoning_under_change
+    title: Reasoning under change
+    weight: 5
+    excluded_rounds: [1]
+critical_failures:
+  - Fixture failure one is present.
+  - Fixture failure two is present.
+  - Fixture failure three is present.
+reference_properties:
+  common:
+    - Fixture property that applies to every round.
+  by_round:
+    1:
+      - Fixture property for round one.
+    2:
+      - Fixture property for round two.
+    3:
+      - Fixture property for round three.
+    4:
+      - Fixture property for round four.

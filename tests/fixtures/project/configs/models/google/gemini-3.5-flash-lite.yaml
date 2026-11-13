@@ -1,0 +1,40 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Gemini 3.5 Flash-Lite candidate, native_recommended profile: provider defaults for thinking; only
+# max_output_tokens, which the harness requires, is set (same ceiling as the Haiku 5.5 and GPT-6 Luna
+# candidates). It is Google's newest stable low-cost tier, the counterpart of Haiku and Luna, though at
+# $0.30 / $2.50 per 1M tokens it costs more than either ($0.10 / $0.50). Limits, defaults, and prices are
+# from aistudio.google.com/docs/models/gemini-3.5-flash-lite and aistudio.google.com/docs/pricing, read
+# 2026-11-12. The knowledge cutoff is not stated there.
+configuration_id: google-gemini-3-5-flash-lite
+revision: 1
+track: cloud
+adapter: gemini
+provider: google
+model: gemini-3.5-flash-lite
+profile: native_recommended
+context_limit: 1048576  # documented input token limit
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: harness requires an explicit ceiling (model limit 65,536). Truncation is recorded, never retried.
+  thinking_level:
+    state: omitted
+    documented_default: minimal
+    source: native_recommended uses the provider default (model page lists minimal, low, medium, high)
+    verified_on: 2026-11-12
+  include_thoughts:
+    state: omitted
+    source: provider default
+  temperature:
+    state: omitted
+    source: provider default
+adapter_options:
+  api_version: v1
+  timeout_s: 600
+  pricing:
+    input_usd_per_mtok: 0.30
+    cached_input_usd_per_mtok: 0.03
+    output_usd_per_mtok: 2.50  # includes thinking tokens
+    source: aistudio.google.com/docs/pricing standard paid tier, read 2026-11-12 (no prompt-size threshold stated)
+    verified_on: "2026-11-12"

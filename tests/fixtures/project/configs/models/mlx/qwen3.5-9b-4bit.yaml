@@ -1,0 +1,113 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# LOCAL-001 (spec section 4.2): Qwen 3.5 9B, 4-bit MLX conversion, run directly by mlx-lm in the pinned worker
+# environment (requirements-mlx-worker.txt). Open-weight model from Alibaba's Qwen team; provider is the model
+# vendor, so self-preference maps to the catalog's alibaba vendor.
+#
+# Checkpoint: mlx-community/Qwen3.5-9B-4bit at commit 8b2b98c (2026-03-02), converted from Qwen/Qwen3.5-9B;
+# affine 4-bit, group size 64. Weight and tokenizer hashes match the Hugging Face LFS sha256 (checked
+# 2026-11-13). The snapshot includes vision weights; mlx-lm loads the text model only (benchmark is text-only).
+# Different weights (affine 4-bit vs nvfp4), engine, and prompt renderer from configs/models/ollama/
+# qwen3.5-9b-mlx.yaml, so results are not interchangeable with that configuration.
+#
+# native_recommended profile: the model card's "thinking mode for general tasks" sampling (Qwen/Qwen3.5-9B
+# README at c202236, "Best Practices"). Neither repository ships a generation_config.json, and mlx-lm's own
+# default is greedy decoding, so every recommended value is explicit. Discrepancy: mlx-lm applies
+# presence_penalty to tokens in the last presence_context_size tokens (default 20, prompt included); the
+# OpenAI-style penalty the card assumes covers all generated tokens.
+configuration_id: local-qwen35-9b-4bit-mlx
+revision: 1
+track: local
+adapter: mlx-lm
+provider: alibaba
+model: mlx-community/Qwen3.5-9B-4bit
+profile: native_recommended
+context_limit: 32768
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; includes thinking tokens and the stop token. Truncation is recorded, never retried.
+  context_window:
+    state: explicit
+    value: 32768
+    source: >-
+      same window as the Ollama Qwen configurations; covers the qualification envelope (prompt + 2 x output budget +
+      follow-up). Enforced before generation. The model card advises >= 128K to preserve thinking on hard tasks.
+  enable_thinking:
+    state: omitted
+    documented_default: true
+    source: chat template opens a <think> block unless enable_thinking is false; model card says thinking is the default
+    verified_on: 2026-11-13
+  temperature:
+    state: explicit
+    value: 1.0
+    source: model card, thinking mode for general tasks
+    verified_on: 2026-11-13
+  top_p:
+    state: explicit
+    value: 0.95
+    source: model card, thinking mode for general tasks
+    verified_on: 2026-11-13
+  top_k:
+    state: explicit
+    value: 20
+    source: model card, thinking mode for general tasks
+    verified_on: 2026-11-13
+  min_p:
+    state: explicit
+    value: 0.0
+    source: model card, thinking mode for general tasks
+    verified_on: 2026-11-13
+  presence_penalty:
+    state: explicit
+    value: 1.5
+    source: model card, thinking mode for general tasks (mlx-lm window semantics, see header)
+    verified_on: 2026-11-13
+  presence_context_size:
+    state: omitted
+    documented_default: 20
+    source: mlx-lm 0.32.2 make_logits_processors default; no model-card equivalent
+  repetition_penalty:
+    state: omitted
+    documented_default: 1.0
+    source: model card recommends 1.0 (no effect); mlx-lm applies none when omitted
+  seed:
+    state: omitted
+    source: drawn per invocation by the worker and recorded in the native response
+adapter_options:
+  python: .venv-mlx/bin/python
+  engine:
+    python: 3.12.16
+    mlx: 0.32.4
+    mlx-metal: 0.32.4
+    mlx-lm: 0.32.2
+    transformers: 5.22.2
+    tokenizers: 0.23.3
+    huggingface_hub: 2.4.0
+    jinja2: 3.1.6
+    numpy: 2.5.4
+  revision: 8b2b98c00a6b4d291155e4890773ca8f769aee53
+  base_repository: Qwen/Qwen3.5-9B
+  base_revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  files:
+    .gitattributes: 34448b82c17d60fec9b65b1f093c115ddbaadc04beb1b0140b6bfed2e012a930
+    README.md: 1407e3e3337063c280b2fe1a63724908a5051cfbf26cd8b98f247432b0382537
+    chat_template.jinja: a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715
+    config.json: a96942cb6a8a1d3f1d17514d81a1925d04362a6a3233b389d13012211baaa9f8
+    model-00001-of-00002.safetensors: a68b87558c6ef43f74c2bd63ce7e9092ceddc3101f3def0030774bae5f42aadd
+    model-00002-of-00002.safetensors: b0a770bf8469c7f3f18756a0e0283f1c1174344a83e059a4e483f6af4907352d
+    model.safetensors.index.json: dd023913fb87cfdae27fb11dcf695117c925833796ccac3c64117d6652d8ff1e
+    preprocessor_config.json: 27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516
+    processor_config.json: 14932921ca485d458a04dafd8069fbb0a4505622a48208d19ed247115801385b
+    tokenizer.json: 87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4
+    tokenizer_config.json: e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182
+    video_preprocessor_config.json: 7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13
+    vocab.json: ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003
+  timeout_s: 1800
+  load_timeout_s: 600
+  prefill_step_size: 2048
+  memory_preflight:
+    output_tokens: 64
+    max_swapout_mb: 64
+    max_pressure_level: 2
+  host: Apple M4 Pro, 48 GB unified memory (not the 32 GB reference machine)

@@ -1,0 +1,43 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Grok 4.3 candidate: xAI's cheapest general-purpose reasoning model (grok-build-0.1 is cheaper but is a
+# coding model). xAI has no Haiku-class small tier, so this costs about 12x the Haiku 5.5 candidate.
+# Reasoning defaults to low and can be disabled with effort none. xAI documents no dated id for it;
+# qualification records the build fingerprint and version, and checks prices against the Models API.
+# native_recommended profile: provider defaults for reasoning and sampling; only max_output_tokens is set.
+# Context, defaults, and prices are from docs.x.ai/developers/models/grok-4.3 and docs.x.ai/developers/models,
+# read 2026-11-12.
+configuration_id: xai-grok-4-3
+revision: 1
+track: cloud
+adapter: xai
+provider: xai
+model: grok-4.3
+profile: native_recommended
+context_limit: 1000000
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; on xAI it counts visible output only, not reasoning tokens
+  reasoning_effort:
+    state: omitted
+    documented_default: low
+    source: native_recommended uses the provider default (model page lists none, low, medium, high, xhigh)
+    verified_on: 2026-11-12
+  temperature:
+    state: omitted
+    source: provider default
+adapter_options:
+  timeout_s: 900  # xAI recommends at least 900 s for reasoning models
+  replay_reasoning: true
+  pricing:
+    input_usd_per_mtok: 1.25
+    cached_input_usd_per_mtok: 0.20
+    output_usd_per_mtok: 2.50
+    long_context:
+      threshold_input_tokens: 199999  # xAI: prompts of 200k tokens or more use long-context rates
+      input_usd_per_mtok: 2.50
+      cached_input_usd_per_mtok: 0.40
+      output_usd_per_mtok: 5.00
+    source: docs.x.ai/developers/models pricing table, read 2026-11-12; xAI also reports cost per request
+    verified_on: "2026-11-12"

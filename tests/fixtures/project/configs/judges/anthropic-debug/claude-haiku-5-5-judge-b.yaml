@@ -1,0 +1,31 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# DEBUG ONLY: cheap Haiku judge for exercising the evaluation pipeline. Not for reported results.
+configuration_id: debug-judge-b-anthropic-claude-haiku-5-5
+revision: 1
+track: cloud
+adapter: anthropic
+provider: anthropic
+model: claude-haiku-5-5
+profile: judge
+context_limit: 1000000
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: judge output is a JSON assessment; non-streaming request ceiling
+  effort:
+    state: explicit
+    value: medium
+    documented_default: medium
+    source: debug judges differ in effort so they can disagree
+  thinking:
+    state: omitted
+    documented_default: {type: adaptive}
+    source: provider default
+adapter_options:
+  timeout_s: 600
+  pricing:
+    input_usd_per_mtok: 0.10
+    output_usd_per_mtok: 0.50
+    source: claude-api reference model table cached 2026-11-03; verify against the first-party pricing page
+    verified_on: null

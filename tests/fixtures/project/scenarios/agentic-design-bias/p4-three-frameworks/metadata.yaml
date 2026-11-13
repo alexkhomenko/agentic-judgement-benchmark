@@ -1,0 +1,8 @@
+# TEST FIXTURE: synthetic single-round probe for the harness tests.
+scenario_id: agentic-design-bias-p4-three-frameworks
+revision: "fixture-1"
+system_prompt: ../system.md
+rounds:
+  - round: 1
+    name: three-frameworks
+    prompt: prompt.md

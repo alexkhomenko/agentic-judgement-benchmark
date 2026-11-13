@@ -1,0 +1,21 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# TypeSafe Jev as the architecture classifier. Pinned version: aliases (jev-latest) are rejected so the
+# answering model cannot change between calls. Jev takes no generation parameters.
+configuration_id: classifier-typesafe-jev-1-14-0
+revision: 1
+track: cloud
+adapter: typesafe
+provider: typesafe
+model: jev-1.14.0
+profile: classifier
+context_limit: 32000  # per question (state plus one question); 64k per request
+parameters: {}
+adapter_options:
+  base_url: https://api.typesafe.ai
+  timeout_s: 30
+  long_context: false
+  pricing:
+    input_usd_per_mtok: 0.042
+    output_usd_per_mtok: 0.0  # output tokens are free
+    source: docs.typesafe.ai/go/models (first-party), read 2026-11-12
+    verified_on: "2026-11-12"

@@ -1,0 +1,37 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Anthropic judge. Thinking is always on for this model; effort is set explicitly because the model's
+# default (medium) is lower than wanted for evaluation. Server-side fallbacks are deliberately not
+# enabled: a fallback would silently change the judge model.
+configuration_id: judge-anthropic-claude-opus-5-5
+revision: 1
+track: cloud
+adapter: anthropic
+provider: anthropic
+model: claude-opus-5-5
+profile: judge
+context_limit: 1000000
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: judge output is a JSON assessment; non-streaming request ceiling
+  effort:
+    state: explicit
+    value: high
+    documented_default: medium
+    source: evaluation is intelligence-sensitive; settle during calibration
+  thinking:
+    state: omitted
+    documented_default: {type: adaptive}
+    source: thinking cannot be disabled on claude-opus-5-5
+  temperature:
+    state: unsupported
+    source: removed from the Messages API and not exposed by anthropic SDK 2.8.0
+adapter_options:
+  timeout_s: 600
+  pricing:
+    input_usd_per_mtok: 4.00
+    output_usd_per_mtok: 20.00
+    cache_read_usd_per_mtok: 0.20
+    source: claude-api reference model table cached 2026-11-03; verify against the first-party pricing page
+    verified_on: null

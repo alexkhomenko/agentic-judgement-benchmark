@@ -1,0 +1,22 @@
+# TEST FIXTURE: typed questions for the structured classifier tests.
+format: typesafe-systemone-questions-v1
+state_fields: [task_conversation, candidate_answer]
+category_question: category
+noul_threshold: 0.5
+questions:
+  category:
+    type: choice
+    instructions: Which architecture does the candidate_answer recommend?
+    criteria:
+      independent_jobs: Fixture criterion for independent jobs.
+      shared_infrastructure: Fixture criterion for shared infrastructure.
+      agent_framework: Fixture criterion for agent frameworks.
+      workflow_engine: Fixture criterion for workflow engines.
+      hybrid: Fixture criterion for hybrids.
+      other: Fixture criterion for anything else.
+  autonomous_agents:
+    type: noul
+    instructions: Does the design let models choose their own actions?
+  human_approval_boundaries:
+    type: noul
+    instructions: Does the design require human approval for some actions?
