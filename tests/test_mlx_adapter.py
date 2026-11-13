@@ -5,8 +5,10 @@ controller-side memory sampler, qualification, the worker subprocess channel, an
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +32,7 @@ from archbench.planning.loader import load_scenario
 from archbench.reporting.report import publish_report
 from archbench.storage.artifacts import ArtifactStore
 from archbench.workers import mlx_worker
-from archbench.workers.host_memory import MemorySampler
+from archbench.workers.host_memory import HostProbe, MemorySampler
 from archbench.workers.mlx_process import SubprocessWorker, WorkerExited, WorkerTimeout
 from archbench.workers.mlx_worker import PROTOCOL
 
@@ -367,6 +369,35 @@ def test_memory_sampler_reports_deltas_and_survives_without_a_process() -> None:
     summary = sampler.summary()
     assert summary["available"] and summary["pressure_max"] == "warning"
     assert summary["swapouts_bytes"] == 3 * 16384 and summary["worker_footprint_max_bytes"] is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="kernel memory counters are read on macOS only")
+def test_host_probe_reads_real_kernel_counters() -> None:
+    probe = HostProbe()
+    child = subprocess.Popen([sys.executable, "-c", "b = bytearray(64 * 1024 * 1024); import time; time.sleep(5)"])
+    try:
+        time.sleep(1)
+        footprint = probe.footprint(child.pid)
+    finally:
+        child.kill()
+        child.wait()
+    assert footprint is not None and footprint > 60 * 1024**2  # struct layout matches the kernel's
+    assert probe.pressure_level() in (1, 2, 4) and 0 <= (probe.free_percent() or -1) <= 100
+    counters = probe.vm_counters()
+    assert counters is not None and min(counters.values()) >= 0
+    assert (probe.swap_used() or 0) >= 0 and probe.page_size() in (4096, 16384)
+    info = probe.host_info()
+    assert info["memory_bytes"] > 0 and info["os_version"]
+    assert HostProbe().footprint(2**22) is None  # no such process
+
+
+def test_host_probe_reports_unavailable_off_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    probe = HostProbe()
+    assert probe.pressure_level() is None and probe.vm_counters() is None and probe.footprint(1) is None
+    with MemorySampler(None, interval_s=0.01, probe=probe) as sampler:
+        pass
+    assert sampler.summary() == {"available": False, "reason": "host memory sampling is implemented for macOS only"}
 
 
 def test_worker_manifest_hashes_resolved_snapshot_files(tmp_path: Path) -> None:
