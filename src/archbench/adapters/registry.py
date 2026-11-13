@@ -16,6 +16,7 @@ from .cloud.typesafe_jev import TypeSafeAdapter
 from .cloud.xai_responses import XAIAdapter
 from .fake import FakeAdapter
 from .fake_judge import FakeJudgeAdapter
+from .local.mlx_lm import MlxLmAdapter
 from .local.ollama_chat import OllamaAdapter
 
 
@@ -67,5 +68,6 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "xai": XAIAdapter(api_key=xai_key),
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
         "ollama": OllamaAdapter(),
+        "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),
     })

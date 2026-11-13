@@ -1,0 +1,43 @@
+# Pinned environment of the MLX-LM worker (src/archbench/workers/mlx_worker.py), Python 3.12.
+# Recreate with:
+#   python3.12 -m venv .venv-mlx && .venv-mlx/bin/pip install --no-deps -r requirements-mlx-worker.txt
+# Changing any pin is an engine change: update adapter_options.engine in configs/models/mlx/ (a new
+# configuration revision), or qualification and every call refuse to run.
+annotated-doc==0.0.6
+annotated-types==0.8.0
+anyio==4.16.0
+click==8.5.1
+filelock==4.2.10
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.8.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface_hub==2.4.0
+idna==3.20
+Jinja2==3.1.6
+markdown-it-py==4.3.0
+MarkupSafe==3.0.4
+mdurl==0.1.2
+mlx==0.32.4
+mlx-lm==0.32.2
+mlx-metal==0.32.4
+numpy==2.5.4
+packaging==26.3
+protobuf==7.36.2
+pydantic==2.14.3
+pydantic_core==2.50.4
+Pygments==2.21.0
+PyYAML==6.0.3
+regex==2026.11.9
+rich==15.0.0
+safetensors==0.8.0
+sentencepiece==0.2.3
+shellingham==1.5.4
+tokenizers==0.23.3
+tqdm==4.70.1
+transformers==5.22.2
+truststore==0.10.5
+typer==0.29.1
+typing-inspection==0.4.5
+typing_extensions==4.16.0
