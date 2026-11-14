@@ -1,0 +1,48 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Kimi K3.1 Pro candidate: Moonshot AI's current flagship on the Kimi API (K2 series closed to new users
+# from 2026-10-31 and retiring end of December 2026). Moonshot offers no dated model id, so qualification
+# records the /v1/models card (created, context_length, supports_reasoning). K3 models always think;
+# effort defaults to max. temperature (1.0), top_p (0.95), n and the penalties are fixed and any other
+# value is an error, so they are never sent. native_recommended profile: provider defaults; only
+# max_output_tokens is set. Facts from platform.kimi.ai/docs (api/chat, api/list-models,
+# api/models-overview, guide/use-reasoning-effort, guide/context-caching), read 2026-11-14.
+configuration_id: kimi-k3.1-pro
+revision: 1
+track: cloud
+adapter: kimi
+provider: moonshot
+model: kimi-k3.1-pro
+profile: native_recommended
+context_limit: 1048576
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; includes reasoning tokens (API default 131072). The thinking guide recommends at least 16000
+  reasoning_effort:
+    state: omitted
+    documented_default: max
+    source: native_recommended uses the provider default (low, high, max)
+    verified_on: 2026-11-14
+  temperature:
+    state: omitted
+    documented_default: 1.0
+    source: fixed for K3 series; passing any other value returns an error
+    verified_on: 2026-11-14
+  top_p:
+    state: omitted
+    documented_default: 0.95
+    source: fixed for K3 series; passing any other value returns an error
+    verified_on: 2026-11-14
+adapter_options:
+  timeout_s: 960  # the gateway returns 504 after 900 s without a response
+  pricing:
+    # Per 1M tokens. Cache reads, cache writes, and uncached input are disjoint parts of prompt_tokens.
+    # Writes use the 5m rate by default: the adapter never sends prompt_cache_options.
+    input_usd_per_mtok: 2.00            # cache miss
+    cached_input_usd_per_mtok: 0.20     # cache hit
+    cache_write_5m_usd_per_mtok: 2.00
+    cache_write_1h_usd_per_mtok: 4.00
+    output_usd_per_mtok: 10.00          # includes reasoning tokens
+    source: platform.kimi.ai/docs/pricing/chat (K3 series table), read 2026-11-14
+    verified_on: "2026-11-14"

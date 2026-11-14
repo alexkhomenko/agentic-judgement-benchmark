@@ -10,6 +10,7 @@ from .base import InferenceAdapter
 from .cloud.anthropic_messages import AnthropicAdapter
 from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
+from .cloud.kimi_chat import KimiAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
 from .cloud.typesafe_jev import TypeSafeAdapter
@@ -58,6 +59,9 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     deepseek_key = secrets.api_key("deepseek") or os.environ.get("DEEPSEEK_API_KEY") or None
     if deepseek_key:
         GUARD.register(deepseek_key)
+    moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
+    if moonshot_key:
+        GUARD.register(moonshot_key)
     return AdapterRegistry({
         "fake": FakeAdapter(),
         "fake-judge": FakeJudgeAdapter(),
@@ -67,6 +71,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "mistral": MistralAdapter(api_key=mistral_key),
         "xai": XAIAdapter(api_key=xai_key),
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
+        "kimi": KimiAdapter(api_key=moonshot_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),

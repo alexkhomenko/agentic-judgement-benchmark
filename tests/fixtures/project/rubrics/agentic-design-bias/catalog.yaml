@@ -17,6 +17,7 @@ vendors:
   alibaba: {candidate_providers: [alibaba]}
   deepseek: {candidate_providers: [deepseek]}
   xai: {candidate_providers: [xai]}
+  moonshot: {candidate_providers: [moonshot]}
   independent: {candidate_providers: []}
 items:
   - {id: claude-agent-sdk, name: Claude Agent SDK, aliases: [Claude Code SDK], vendor: anthropic, kind: sdk, model_coupling: vendor_model}
@@ -37,3 +38,4 @@ items:
   - {id: qwen, name: Qwen, vendor: alibaba, kind: model, model_coupling: vendor_model, open_weights: null}
   - {id: deepseek, name: DeepSeek, vendor: deepseek, kind: model, model_coupling: vendor_model, open_weights: true}
   - {id: grok, name: Grok, vendor: xai, kind: model, model_coupling: vendor_model, open_weights: null}
+  - {id: kimi, name: Kimi, vendor: moonshot, kind: model, model_coupling: vendor_model, open_weights: true}
