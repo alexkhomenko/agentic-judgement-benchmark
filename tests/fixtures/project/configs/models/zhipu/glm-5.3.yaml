@@ -1,0 +1,52 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# GLM-5.3 candidate: Z.ai's current flagship (released 2026-08-18), text-only, on the pay-as-you-go API
+# (not the Coding Plan endpoint). Z.ai offers no dated model id and documents no model-list endpoint, so
+# qualification proves the served id with a live probe and every response's `model` is checked. GLM-5.3
+# always thinks (thinking.type "disabled" is an error); effort defaults to max. clear_thinking defaults to
+# true on this endpoint, so the server ignores reasoning_content replayed from earlier turns.
+# native_recommended profile: provider defaults; only max_output_tokens is set. Facts from docs.z.ai
+# (api-reference/llm/chat-completion, guides/llm/glm-5.3, guides/overview/concept-param,
+# guides/capabilities/thinking-mode, guides/overview/pricing), read 2026-11-14.
+configuration_id: glm-5.3
+revision: 1
+track: cloud
+adapter: glm
+provider: zhipu
+model: glm-5.3
+profile: native_recommended
+context_limit: 1048576
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates (API default 65536, maximum 131072). The docs do not say whether reasoning tokens count against max_tokens
+  reasoning_effort:
+    state: omitted
+    documented_default: max
+    source: native_recommended uses the provider default (GLM-5.3 accepts low, high, max)
+    verified_on: 2026-11-14
+  clear_thinking:
+    state: omitted
+    documented_default: true
+    source: provider default on the standard endpoint; prior-turn reasoning_content is ignored
+    verified_on: 2026-11-14
+  temperature:
+    state: omitted
+    documented_default: 1.0
+    source: native_recommended uses the provider default
+    verified_on: 2026-11-14
+  top_p:
+    state: omitted
+    documented_default: 0.95
+    source: native_recommended uses the provider default
+    verified_on: 2026-11-14
+adapter_options:
+  timeout_s: 900  # Z.ai documents no server-side limit
+  pricing:
+    # Per 1M tokens. Cache hits (implicit caching) and uncached input are disjoint parts of prompt_tokens.
+    # Cache storage is listed as limited-time free and is not reported per request.
+    input_usd_per_mtok: 1.40         # cache miss
+    cached_input_usd_per_mtok: 0.26  # cache hit
+    output_usd_per_mtok: 4.40        # reasoning is billed as output; usage does not break it out
+    source: docs.z.ai/guides/overview/pricing (GLM-5.3), read 2026-11-14
+    verified_on: "2026-11-14"
