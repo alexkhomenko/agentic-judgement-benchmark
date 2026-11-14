@@ -54,6 +54,8 @@ class SubprocessWorker:
         self._log = tempfile.TemporaryFile("w+b")
         self._proc = subprocess.Popen([str(interpreter), "-I", str(script)], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=self._log, env=env, close_fds=True)
+        assert self._proc.stdin is not None
+        os.set_blocking(self._proc.stdin.fileno(), False)  # requests are written with os.write under a deadline
         self._buffer = b""
         self.command = [str(interpreter), "-I", str(script)]
 
@@ -62,30 +64,48 @@ class SubprocessWorker:
         return self._proc.pid if self._proc.poll() is None else None
 
     def request(self, message: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+        """Send one request and read one reply, both under a single deadline.
+
+        Stdin is written non-blockingly so that a worker that stops reading (busy, wedged) cannot stall
+        the controller on a prompt larger than the pipe buffer; on timeout the worker is killed, so a
+        partially written request never desynchronises the channel.
+        """
         assert self._proc.stdin is not None and self._proc.stdout is not None
-        try:
-            self._proc.stdin.write((json.dumps(message) + "\n").encode())
-            self._proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            raise WorkerExited(self.exit_status()) from None
         deadline = time.monotonic() + timeout_s
-        fd = self._proc.stdout.fileno()
+        pending = memoryview((json.dumps(message) + "\n").encode())
+        stdin_fd, stdout_fd = self._proc.stdin.fileno(), self._proc.stdout.fileno()
         with selectors.DefaultSelector() as selector:
-            selector.register(fd, selectors.EVENT_READ)
-            while b"\n" not in self._buffer:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.kill()
-                    raise WorkerTimeout(f"no reply to {message.get('op')!r} within {timeout_s}s; worker killed")
-                if not selector.select(remaining):
+            selector.register(stdin_fd, selectors.EVENT_WRITE)
+            while pending:
+                if not self._wait(selector, deadline, message, timeout_s):
                     continue
-                chunk = os.read(fd, 1 << 20)
+                try:
+                    pending = pending[os.write(stdin_fd, pending):]
+                except BlockingIOError:
+                    continue
+                except OSError:  # BrokenPipeError included: the worker is gone
+                    raise WorkerExited(self.exit_status()) from None
+        with selectors.DefaultSelector() as selector:
+            selector.register(stdout_fd, selectors.EVENT_READ)
+            while b"\n" not in self._buffer:
+                if not self._wait(selector, deadline, message, timeout_s):
+                    continue
+                chunk = os.read(stdout_fd, 1 << 20)
                 if not chunk:
                     raise WorkerExited(self.exit_status())
                 self._buffer += chunk
         line, self._buffer = self._buffer.split(b"\n", 1)
         reply: dict[str, Any] = json.loads(line)
         return reply
+
+    def _wait(self, selector: selectors.BaseSelector, deadline: float, message: dict[str, Any],
+              timeout_s: float) -> bool:
+        """Block until the registered fd is ready (True) or the wait lapses (False); kill on deadline."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            self.kill()
+            raise WorkerTimeout(f"no reply to {message.get('op')!r} within {timeout_s}s; worker killed")
+        return bool(selector.select(remaining))
 
     def exit_status(self) -> dict[str, Any]:
         try:

@@ -477,6 +477,8 @@ STUB_WORKER = textwrap.dedent("""
                                                      "secret": os.environ.get("ANTHROPIC_API_KEY")}}) + "\\n")
         if op == "shutdown":
             break
+        if op == "deaf":
+            time.sleep(30)
 """)
 
 
@@ -499,6 +501,21 @@ def test_subprocess_channel_isolates_stdout_env_crashes_and_hangs(tmp_path: Path
     hung.close()
     with pytest.raises(FileNotFoundError):
         SubprocessWorker(str(tmp_path / "missing-python"), script=script)
+
+
+def test_request_deadline_covers_writing_a_prompt_larger_than_the_pipe_buffer(tmp_path: Path) -> None:
+    script = tmp_path / "stub_worker.py"
+    script.write_text(STUB_WORKER)
+    big = "x" * (4 << 20)
+    worker = SubprocessWorker(sys.executable, script=script)
+    assert worker.request({"op": "hello", "prompt": big}, 10)["result"]["op"] == "hello"
+    assert worker.request({"op": "deaf"}, 10)["result"]["op"] == "deaf"
+    started = time.monotonic()
+    with pytest.raises(WorkerTimeout):
+        worker.request({"op": "hello", "prompt": big}, 0.5)
+    assert time.monotonic() - started < 5
+    assert worker.pid is None
+    worker.close()
 
 
 def test_local_mlx_qwen_in_a_cross_vendor_p6_run(env: Env) -> None:
