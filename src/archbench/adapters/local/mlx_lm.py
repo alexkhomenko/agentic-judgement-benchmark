@@ -594,14 +594,29 @@ def _decoding_check(config: ModelConfiguration, tokenizer: dict[str, Any],
             problems.append(f"{step} finished with {execution.finish_reason}, not an end-of-turn token")
         if not re.search(rf"\b{word}\b", extracted.final_answer, re.IGNORECASE):
             problems.append(f"{step} answered {extracted.final_answer[:80]!r}, expected {word!r}")
-        opened = bool((execution.native_response or {}).get("thinking_opened"))
-        if thinking_expected and not (opened and extracted.reasoning_text):
+        if thinking_expected and not (_thinking_block_opened(execution, tokenizer) and extracted.reasoning_text):
             problems.append(f"{step}: thinking expected but none was parsed")
         if not thinking_expected and extracted.reasoning_text:
             problems.append(f"{step}: thinking disabled but reasoning was produced")
         notes.append(f"{step}: {extracted.final_answer[:40]!r}, reasoning {len(extracted.reasoning_text or '')} chars")
     return QualificationCheck(name="output_decoding", passed=not problems and bool(outputs),
                               detail="; ".join(problems) or "; ".join(notes))
+
+
+def _thinking_block_opened(execution: NativeExecution, tokenizer: dict[str, Any]) -> bool:
+    """Whether a thinking block was opened, by the generation prompt or by the completion itself.
+
+    Templates differ: some end the generation prompt with the start marker, hybrid ones (Qwen3) leave it
+    for the model to emit. A tokenizer with only an end marker has nothing to look for.
+    """
+    native = execution.native_response or {}
+    if native.get("thinking_opened"):
+        return True
+    start, end = tokenizer.get("think_start"), tokenizer.get("think_end")
+    if not start:
+        return True
+    completion = str(native.get("completion_text") or "")
+    return start in (completion.split(end)[0] if end else completion)
 
 
 def _pin_problems(config: ModelConfiguration) -> list[str]:

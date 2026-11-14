@@ -101,9 +101,12 @@ class FakeWorker:
 
     def __init__(self, python: str, *, versions: dict[str, Any] | None = None, answer: str = "Use Qwen.",
                  finish: str = "stop", think_closed: bool = True, load_error: dict[str, Any] | None = None,
-                 fail_generate: Exception | None = None, thinking_markers: bool = True) -> None:
+                 fail_generate: Exception | None = None, thinking_markers: bool = True,
+                 template_opens_thinking: bool = True, model_thinks: bool = True) -> None:
         self.python, self.answer, self.finish, self.think_closed = python, answer, finish, think_closed
         self.thinking_markers = thinking_markers
+        # Hybrid templates (Qwen3) leave the block for the model to open: the completion starts with <think>.
+        self.template_opens_thinking, self.model_thinks = template_opens_thinking, model_thinks
         self.versions = versions if versions is not None else dict(CONFIG.adapter_options["engine"])  # type: ignore[arg-type]
         self.load_error, self.fail_generate = load_error, fail_generate
         self.requests: list[dict[str, Any]] = []
@@ -155,6 +158,8 @@ class FakeWorker:
         if not self.thinking_markers:  # the template knows nothing about thinking
             thinking = False
             rendered += "<|im_start|>assistant\n"
+        elif thinking and not self.template_opens_thinking:
+            rendered += "<|im_start|>assistant\n"
         else:
             rendered += "<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
         prompt_ids = list(range(len(rendered) // 4))
@@ -164,8 +169,10 @@ class FakeWorker:
                                            "prompt_token_ids": prompt_ids}}
         last = message["messages"][-1]["content"]
         answer = last.rsplit(" ", 1)[-1] if last.startswith("Reply with exactly one word") else self.answer
-        if not thinking:
+        if not thinking or not self.model_thinks:
             text, tokens = answer, [1, 2, 3]
+        elif not self.template_opens_thinking:
+            text, tokens = f"<think>\nprivate reasoning\n</think>\n\n{answer}", [248068, 5, 6, THINK_END_ID, 7, 8]
         elif self.think_closed:
             text, tokens = f"private reasoning\n</think>\n\n{answer}", [5, 6, THINK_END_ID, 7, 8]
         else:
@@ -369,6 +376,20 @@ def test_models_without_thinking_markers_qualify_unless_thinking_is_enabled(thin
     checks = {c.name: c for c in report.checks}
     assert report.passed, checks
     assert "reasoning 0 chars" in checks["output_decoding"].detail
+
+
+def test_thinking_opened_by_the_completion_qualifies() -> None:
+    report = adapter(template_opens_thinking=False).qualify(CONFIG, REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    assert "reasoning 17 chars" in checks["output_decoding"].detail
+
+
+def test_expected_thinking_the_model_never_opens_fails_decoding() -> None:
+    mlx = adapter(template_opens_thinking=False, model_thinks=False)
+    checks = {c.name: c for c in mlx.qualify(CONFIG, REQUIREMENTS).checks}
+    assert checks["output_decoding"].passed is False
+    assert "thinking expected but none was parsed" in checks["output_decoding"].detail
 
 
 def test_enabling_thinking_without_markers_fails_model_identity() -> None:
