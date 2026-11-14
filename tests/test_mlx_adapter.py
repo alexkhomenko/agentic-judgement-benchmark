@@ -18,7 +18,7 @@ import yaml
 from archbench.adapters.base import AdapterError, InvocationContext, QualificationRequirements
 from archbench.adapters.fake import FakeAdapter
 from archbench.adapters.fake_judge import FakeJudgeAdapter
-from archbench.adapters.local.mlx_lm import REQUIRED, MlxLmAdapter, split_thinking
+from archbench.adapters.local.mlx_lm import REQUIRED, MlxLmAdapter, split_thinking, thinking_block_opened
 from archbench.adapters.registry import AdapterRegistry
 from archbench.domain.configuration import ModelConfiguration
 from archbench.domain.execution import CostIncurred, FailureKind
@@ -172,7 +172,8 @@ class FakeWorker:
         if not thinking or not self.model_thinks:
             text, tokens = answer, [1, 2, 3]
         elif not self.template_opens_thinking:
-            text, tokens = f"<think>\nprivate reasoning\n</think>\n\n{answer}", [248068, 5, 6, THINK_END_ID, 7, 8]
+            text, tokens = ((f"<think>\nprivate reasoning\n</think>\n\n{answer}", [248068, 5, 6, THINK_END_ID, 7, 8])
+                            if self.think_closed else ("<think>\nprivate reasoning that never ends", [248068, 5, 6, 7, 8]))
         elif self.think_closed:
             text, tokens = f"private reasoning\n</think>\n\n{answer}", [5, 6, THINK_END_ID, 7, 8]
         else:
@@ -308,11 +309,15 @@ def test_a_dead_or_stuck_worker_fails_with_memory_evidence_and_is_replaced(tmp_p
     assert retry.succeeded and len(FakeWorker.instances) == 2
 
 
-def test_running_out_of_tokens_while_thinking_leaves_an_empty_truncated_answer(tmp_path: Path) -> None:
-    outcome, files = call(tmp_path, adapter(finish="length", think_closed=False))
+@pytest.mark.parametrize(("template_opens_thinking", "completion_tokens"), [(True, 4), (False, 5)])
+def test_running_out_of_tokens_while_thinking_leaves_an_empty_truncated_answer(
+        tmp_path: Path, template_opens_thinking: bool, completion_tokens: int) -> None:
+    mlx = adapter(finish="length", think_closed=False, template_opens_thinking=template_opens_thinking)
+    outcome, files = call(tmp_path, mlx)
     assert outcome.succeeded and outcome.extracted.truncated
-    assert outcome.extracted.final_answer == "" and files["reasoning.txt"] == "private reasoning that never ends"
-    assert outcome.observations["reasoning_tokens"].value == 4
+    assert outcome.extracted.final_answer == "" and files["final-answer.txt"] == ""
+    assert files["reasoning.txt"] == "private reasoning that never ends"
+    assert outcome.observations["reasoning_tokens"].value == completion_tokens  # every token was thinking
 
 
 def test_disabled_thinking_is_a_template_kwarg_and_yields_no_reasoning(tmp_path: Path) -> None:
@@ -327,10 +332,22 @@ def test_disabled_thinking_is_a_template_kwarg_and_yields_no_reasoning(tmp_path:
     ("plan\n</think>\n\nanswer\n", True, ("plan", "answer")),
     ("<think>\nplan</think>answer", False, ("plan", "answer")),
     ("still thinking", True, ("still thinking", "")),
+    ("<think>\nstill thinking", True, ("still thinking", "")),
     ("plain answer", False, (None, "plain answer")),
 ])
 def test_split_thinking_follows_the_chat_template(text: str, opened: bool, expected: tuple[Any, str]) -> None:
     assert split_thinking(text, {"think_start": "<think>", "think_end": "</think>"}, opened) == expected
+
+
+@pytest.mark.parametrize(("data", "opened"), [
+    ({"thinking_opened": True, "completion_text": "plan"}, True),  # the generation prompt opened it
+    ({"thinking_opened": False, "completion_text": "\n<think>\nplan"}, True),  # the model opened it
+    ({"thinking_opened": False, "completion_text": "Wrap it in <think> tags"}, False),  # answer content
+    ({"thinking_opened": False, "completion_text": "plain answer"}, False),
+])
+def test_thinking_block_opened_by_prompt_or_leading_marker(data: dict[str, Any], opened: bool) -> None:
+    assert thinking_block_opened(data, {"think_start": "<think>", "think_end": "</think>"}) is opened
+    assert thinking_block_opened(data, {"think_start": None, "think_end": None}) is data["thinking_opened"]
 
 
 def test_continuation_replays_native_messages_with_reasoning_content(tmp_path: Path) -> None:

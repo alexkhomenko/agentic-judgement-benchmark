@@ -528,9 +528,9 @@ class MlxLmAdapter:
         data = execution.native_response
         if execution.status != "completed" or data is None:
             raise AdapterError(FailureKind.HARNESS_ERROR, "cannot extract from a failed execution")
-        reasoning, answer = split_thinking(str(data.get("completion_text") or ""),
-                                           (data.get("worker") or {}).get("tokenizer") or {},
-                                           bool(data.get("thinking_opened")))
+        tokenizer = (data.get("worker") or {}).get("tokenizer") or {}
+        reasoning, answer = split_thinking(str(data.get("completion_text") or ""), tokenizer,
+                                           thinking_block_opened(data, tokenizer))
         return ExtractedResponse(final_answer=answer, truncated=data.get("finish_reason") == "length",
                                  finish_reason=data.get("finish_reason"), reasoning_text=reasoning)
 
@@ -563,8 +563,8 @@ class MlxLmAdapter:
 def split_thinking(text: str, tokenizer: dict[str, Any], opened: bool) -> tuple[str | None, str]:
     """Split a completion into (reasoning, answer) the way the chat template parses history.
 
-    With thinking opened by the generation prompt and no end marker, the whole completion is reasoning
-    (generation stopped while thinking) and the answer is empty.
+    With a thinking block open (see `thinking_block_opened`) and no end marker, the whole completion is
+    reasoning (generation stopped while thinking) and the answer is empty.
     """
     start, end = tokenizer.get("think_start"), tokenizer.get("think_end")
     if end and end in text:
@@ -573,8 +573,22 @@ def split_thinking(text: str, tokenizer: dict[str, Any], opened: bool) -> tuple[
             reasoning = reasoning.split(start)[-1]
         return reasoning.lstrip("\n").strip(), text.split(end)[-1].lstrip("\n").strip()
     if opened:
-        return text.strip(), ""
+        reasoning = text.strip()
+        return (reasoning.removeprefix(start).strip() if start else reasoning), ""
     return None, text.strip()
+
+
+def thinking_block_opened(data: dict[str, Any], tokenizer: dict[str, Any]) -> bool:
+    """Whether the completion starts inside a thinking block.
+
+    Either the generation prompt ended with the start marker (`thinking_opened`), or the template left it
+    to the model (hybrid templates such as Qwen3) and the completion begins with it. A start marker later
+    in the text is answer content, not a thinking block.
+    """
+    if data.get("thinking_opened"):
+        return True
+    start = tokenizer.get("think_start")
+    return bool(start) and str(data.get("completion_text") or "").lstrip().startswith(str(start))
 
 
 def _decoding_check(config: ModelConfiguration, tokenizer: dict[str, Any],
@@ -594,29 +608,14 @@ def _decoding_check(config: ModelConfiguration, tokenizer: dict[str, Any],
             problems.append(f"{step} finished with {execution.finish_reason}, not an end-of-turn token")
         if not re.search(rf"\b{word}\b", extracted.final_answer, re.IGNORECASE):
             problems.append(f"{step} answered {extracted.final_answer[:80]!r}, expected {word!r}")
-        if thinking_expected and not (_thinking_block_opened(execution, tokenizer) and extracted.reasoning_text):
+        opened = thinking_block_opened(execution.native_response or {}, tokenizer)
+        if thinking_expected and not (opened and extracted.reasoning_text):
             problems.append(f"{step}: thinking expected but none was parsed")
         if not thinking_expected and extracted.reasoning_text:
             problems.append(f"{step}: thinking disabled but reasoning was produced")
         notes.append(f"{step}: {extracted.final_answer[:40]!r}, reasoning {len(extracted.reasoning_text or '')} chars")
     return QualificationCheck(name="output_decoding", passed=not problems and bool(outputs),
                               detail="; ".join(problems) or "; ".join(notes))
-
-
-def _thinking_block_opened(execution: NativeExecution, tokenizer: dict[str, Any]) -> bool:
-    """Whether a thinking block was opened, by the generation prompt or by the completion itself.
-
-    Templates differ: some end the generation prompt with the start marker, hybrid ones (Qwen3) leave it
-    for the model to emit. A tokenizer with only an end marker has nothing to look for.
-    """
-    native = execution.native_response or {}
-    if native.get("thinking_opened"):
-        return True
-    start, end = tokenizer.get("think_start"), tokenizer.get("think_end")
-    if not start:
-        return True
-    completion = str(native.get("completion_text") or "")
-    return start in (completion.split(end)[0] if end else completion)
 
 
 def _pin_problems(config: ModelConfiguration) -> list[str]:
@@ -694,7 +693,7 @@ def _observations(data: dict[str, Any], load: dict[str, Any], loaded_now: bool) 
                 reasoning = i + len(end_ids)
                 break
     if reasoning is None:
-        reasoning = len(completion) if data.get("thinking_opened") else 0
+        reasoning = len(completion) if thinking_block_opened(data, tokenizer) else 0
     obs["reasoning_tokens"] = Observation(value=reasoning, unit="tokens",
                                           source=f"{source}: completion tokens through the thinking end marker")
     obs["engine_load_ms"] = Observation(
