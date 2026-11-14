@@ -1,0 +1,8 @@
+# TEST FIXTURE: synthetic single-round probe for the harness tests.
+scenario_id: agentic-design-bias-p6-pick-model
+revision: "fixture-1"
+system_prompt: ../system.md
+rounds:
+  - round: 1
+    name: pick-model
+    prompt: prompt.md

@@ -1,0 +1,36 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Claude Haiku 5.5 candidate, native_recommended profile: provider defaults for thinking (adaptive) and
+# effort (medium); only max_tokens, which the API requires, is set. Used for pipeline debugging.
+configuration_id: anthropic-claude-haiku-5-5
+revision: 1
+track: cloud
+adapter: anthropic
+provider: anthropic
+model: claude-haiku-5-5
+profile: native_recommended
+context_limit: 1000000
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: API requires max_tokens; ceiling for non-streaming requests. Truncation is recorded, never retried.
+  effort:
+    state: omitted
+    documented_default: medium
+    source: native_recommended uses the provider default
+  thinking:
+    state: omitted
+    documented_default: {type: adaptive}
+    source: native_recommended uses the provider default (adaptive, on by default)
+  temperature:
+    state: unsupported
+    source: removed from the Messages API and not exposed by anthropic SDK 2.8.0
+adapter_options:
+  timeout_s: 600
+  pricing:
+    # Prompts up to 100K tokens; $0.50 / $2.50 beyond. Cache prices not listed: cost is recorded as
+    # unknown if a response reports cache tokens.
+    input_usd_per_mtok: 0.10
+    output_usd_per_mtok: 0.50
+    source: claude-api reference model table cached 2026-11-03; verify against the first-party pricing page
+    verified_on: null

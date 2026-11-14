@@ -1,0 +1,23 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Harness-only fake configuration. Exercises the pipeline without paid calls.
+configuration_id: fake-alpha
+revision: 1
+track: fake
+adapter: fake
+provider: harness
+model: fake-architect-v1
+profile: native_recommended
+context_limit: 32768
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 4000
+    source: harness default for fake adapter
+  temperature:
+    state: unsupported
+    source: fake adapter has no sampling temperature
+  seed:
+    state: omitted
+    source: random per invocation; recorded in native response
+adapter_options:
+  style: thorough

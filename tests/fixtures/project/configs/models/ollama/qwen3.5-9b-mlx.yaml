@@ -1,0 +1,55 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Qwen 3.5 9B (nvfp4, MLX runner) served by the local Ollama engine. Open-weight model from Alibaba's Qwen
+# team; provider is the model vendor, so self-preference maps to the catalog's alibaba vendor. Pinned by
+# digest and engine version, both read from the local install 2026-11-12 (`ollama list`, `/api/version`).
+# The model was pulled 2026-07-03 and is not the newest Qwen (Ollama's library lists qwen3.8:27b-mlx).
+# native_recommended profile: Modelfile defaults for sampling and thinking (thinking on by default); only
+# the output and context budgets, which the harness requires, are set.
+configuration_id: ollama-qwen3-5-9b-mlx
+revision: 1
+track: local
+adapter: ollama
+provider: alibaba
+model: qwen3.5:9b-mlx
+profile: native_recommended
+context_limit: 32768
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the cloud candidates; includes thinking tokens. Truncation is recorded, never retried.
+  context_window:
+    state: explicit
+    value: 32768
+    source: fits the qualification envelope (prompt + 2 x output budget + follow-up); model context_length 262144
+  think:
+    state: omitted
+    documented_default: true
+    source: native_recommended uses the model default (`ollama show`, thinking levels false/true)
+    verified_on: 2026-11-12
+  temperature:
+    state: omitted
+    documented_default: 1
+    source: Modelfile default
+  top_p:
+    state: omitted
+    documented_default: 0.95
+    source: Modelfile default
+  top_k:
+    state: omitted
+    documented_default: 20
+    source: Modelfile default
+  presence_penalty:
+    state: omitted
+    documented_default: 1.5
+    source: Modelfile default
+  seed:
+    state: omitted
+    source: random per invocation
+adapter_options:
+  digest: 203e30078279db51132b9e026ceb7bb21330e5b1af67ef190671b375c9770404
+  engine_version: 0.40.14
+  base_url: http://127.0.0.1:11434
+  timeout_s: 1800
+  keep_alive: 10m
+  host: Apple M4 Pro, 48 GB unified memory

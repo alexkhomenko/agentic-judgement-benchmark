@@ -1,0 +1,51 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# DeepSeek Flash candidate: DeepSeek's cheapest current tier, served (per the Models & Pricing page) by
+# DeepSeek-V4.1-Flash-1017. DeepSeek offers no dated model id, so qualification records the served build
+# name from /models and every response keeps its system_fingerprint. Thinking is on by default (effort
+# high). native_recommended profile: provider defaults; only max_output_tokens is set. Context, defaults,
+# and prices are from api-docs.deepseek.com/quick_start/pricing and api-docs.deepseek.com/api/list-models,
+# read 2026-11-12.
+configuration_id: deepseek-flash
+revision: 1
+track: cloud
+adapter: deepseek
+provider: deepseek
+model: deepseek-flash
+profile: native_recommended
+context_limit: 1048576
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; includes reasoning tokens (model maximum 393,216)
+  thinking:
+    state: omitted
+    documented_default: enabled
+    source: native_recommended uses the provider default
+    verified_on: 2026-11-12
+  reasoning_effort:
+    state: omitted
+    documented_default: high
+    source: native_recommended uses the provider default (low, high, max; none disables thinking)
+    verified_on: 2026-11-12
+  temperature:
+    state: omitted
+    documented_default: 1
+    source: provider default (no effect in thinking mode, per the thinking-mode guide)
+adapter_options:
+  timeout_s: 900  # the server closes a request that has not started inference after 10 minutes
+  pricing:
+    # Peak rates; off-peak is half. Peak is 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday, excluding
+    # Chinese public holidays; weekends and holidays are off-peak all day.
+    input_cache_hit_usd_per_mtok: 0.006
+    input_cache_miss_usd_per_mtok: 0.30
+    output_usd_per_mtok: 1.20
+    off_peak_multiplier: 0.5
+    peak_hours_utc: [[1, 4], [6, 10]]
+    peak_weekdays: [0, 1, 2, 3, 4]
+    # Add the official Chinese public holiday dates and set holidays_cover_through to their last covered
+    # day; until then, weekday peak-hour requests have unknown cost (peak-rate figure recorded beside it).
+    holidays: []
+    holidays_cover_through: null
+    source: api-docs.deepseek.com/quick_start/pricing, read 2026-11-12
+    verified_on: "2026-11-12"

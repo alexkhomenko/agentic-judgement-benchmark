@@ -1,0 +1,16 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Harness-only fake architecture classifier.
+configuration_id: fake-classifier
+revision: 1
+track: fake
+adapter: fake-judge
+provider: harness-classifier
+model: fake-classifier-model
+profile: classifier
+context_limit: 65536
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 2000
+    source: harness default for fake classifier
+adapter_options: {}

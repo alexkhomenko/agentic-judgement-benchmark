@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner; direct MLX worker not started |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -44,12 +44,41 @@ runner does not enforce it. It records engine timing and model memory; API cost 
 not estimated. It does not capture the rendered prompt or input token IDs, which Ollama's chat API does not
 expose (see `src/archbench/adapters/local/__init__.py`).
 
+The local MLX-LM adapter (`adapter: mlx-lm`) runs a pinned Hugging Face checkpoint in a worker subprocess
+(`src/archbench/workers/mlx_worker.py`) inside its own pinned environment, `.venv-mlx`. The worker never
+touches the network or sees provider keys. It hashes every file of the snapshot against the configuration
+before loading, keeps one model warm across calls with the same configuration, and gives each request a
+fresh KV cache. It renders the checkpoint's own chat template and saves the rendered prompt and input token
+IDs (`rendered-prompt.txt`, `input-token-ids.json`). Every pinned package version must match, or nothing
+runs. mlx-lm defaults to greedy decoding, so the configuration must set temperature, and the model card's
+recommended sampling is set explicitly. An omitted seed is drawn by the worker and recorded. A sampler in the
+controller records memory pressure, swap traffic, and the worker's footprint, so the evidence survives a
+worker crash. Qualification covers the spec's engine checks (section 6.3), including a memory preflight that
+fills the whole context window. Mixing `mlx-lm` and Ollama results means comparing different weights
+(affine 4-bit vs nvfp4), engines, and prompt renderers.
+
 ## Setup
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest -q && .venv/bin/mypy
+```
+
+The tests cover the harness code only. Every configuration, rubric, catalog, and scenario they use comes
+from `tests/fixtures/project/`: frozen snapshots of a few configurations, plus synthetic rubrics, catalog,
+prompts, and scenarios. Tests never read the experiment data in `configs/`, `rubrics/`, or `scenarios/`;
+a guard in `tests/conftest.py` fails any test that tries. CI (`.github/workflows/ci.yml`) runs mypy and
+the tests on every pull request and push to `main`.
+
+For the local MLX-LM worker (Apple Silicon), create its pinned environment and fetch the pinned checkpoint:
+
+```sh
+python3.12 -m venv .venv-mlx
+.venv-mlx/bin/pip install --no-deps -r requirements-mlx-worker.txt
+.venv-mlx/bin/hf download mlx-community/Qwen3.5-9B-4bit --revision 8b2b98c00a6b4d291155e4890773ca8f769aee53
+# to pin another checkpoint, print its file manifest for adapter_options.files:
+.venv-mlx/bin/python -I src/archbench/workers/mlx_worker.py manifest <repository> <revision>
 ```
 
 ## Credentials
@@ -109,7 +138,7 @@ runs P6 on Gemini 3.1 Flash-Lite, the cheapest Gemini model open to new projects
 NOT_FOUND for new users). `qwen-local-p6-pick-model.yaml` runs P6 on Qwen 3.5 9B through a local Ollama
 engine (`ollama serve`); update the pinned digest in `configs/models/ollama/` after any `ollama pull`.
 `configs/models/ollama/qwen3.8-27b-mlx.yaml` (Qwen 3.8 27B, thinking level `medium` by default) passes
-qualification but has no experiment yet. `mistral-p6-pick-model.yaml` runs P6 on Mistral Small 4 and needs
+qualification but has no experiment yet. `qwen-mlx-p6-pick-model.yaml` runs P6 on LOCAL-001 (Qwen 3.5 9B 4-bit) through the MLX-LM worker; qualification takes 2-3 minutes, mostly the full-context memory preflight. `mistral-p6-pick-model.yaml` runs P6 on Mistral Small 4 and needs
 a Mistral key. `grok-p6-pick-model.yaml` runs P6 on Grok 4.3 and needs an xAI key.
 `deepseek-p6-pick-model.yaml` runs P6 on DeepSeek Flash and needs a DeepSeek key. `fake-p4-three-frameworks.yaml` and
 `fake-p6-pick-model.yaml` with `agentic-design-bias-fake.yaml` run the same path offline. The catalog

@@ -1,0 +1,41 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Offline: fake judges and the fake extractor for the agentic-design-bias probes. Exercises the pipeline
+# without credentials; scores and bias figures are meaningless. Bump `revision` whenever anything changes.
+policy_id: eval-agentic-design-bias-fake
+revision: 2
+rubric: rubrics/agentic-design-bias/rubric.yaml
+packet_transformation:
+  revision: 1
+  # Framework and vendor names are the substance being measured, so they are never masked. Mask only a
+  # candidate's self-identification. Settle the term list during calibration.
+  identity_terms:
+    - FakeArchitect
+    - fake-architect-v1
+    - fake-architect-v2
+judges:
+  - judge_id: judge-a
+    configuration: configs/judges/fake/fake-judge-a.yaml
+    prompt: configs/evaluation/prompts/judge-v1.md
+  - judge_id: judge-b
+    configuration: configs/judges/fake/fake-judge-b.yaml
+    prompt: configs/evaluation/prompts/judge-v1.md
+judge_max_attempts: 2
+# No classifier: the personal-workflows architecture categories do not apply to these probes.
+extractor:
+  configuration: configs/judges/fake/fake-extractor.yaml
+  prompt: configs/evaluation/prompts/extractor-v2.md
+  catalog: rubrics/agentic-design-bias/catalog.yaml
+  rounds: [1]
+review_selection:
+  fraction: 0.2
+  seed: 1729
+  extremes_per_round: 1
+  disagreement:
+    score_distance: 15
+    dimension_distance: 2
+adjudication:
+  rule: human_precedence
+acceptable:
+  min_adjusted_score: 60
+  status: draft
+scoring_revision: 1

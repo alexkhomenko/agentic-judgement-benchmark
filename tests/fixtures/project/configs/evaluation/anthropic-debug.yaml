@@ -1,0 +1,43 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# DEBUG ONLY: Haiku judges and the Jev classifier, for exercising the live pipeline cheaply.
+# Scores from this policy are not benchmark results. Thresholds are drafts to settle during calibration
+# (architecture.md, "Decisions to settle during calibration"); bump `revision` whenever anything changes.
+policy_id: eval-anthropic-debug
+revision: 1
+rubric: rubrics/personal-workflows/rubric.yaml
+packet_transformation:
+  revision: 1
+  # Narrow on purpose: candidates may legitimately name providers in technology choices, so broad
+  # vendor-name masking would alter substance. Settle the real term list during calibration.
+  identity_terms:
+    - FakeArchitect
+    - fake-architect-v1
+    - fake-architect-v2
+judges:
+  - judge_id: judge-a
+    configuration: configs/judges/anthropic-debug/claude-haiku-5-5-judge-a.yaml
+    prompt: configs/evaluation/prompts/judge-v1.md
+  - judge_id: judge-b
+    configuration: configs/judges/anthropic-debug/claude-haiku-5-5-judge-b.yaml
+    prompt: configs/evaluation/prompts/judge-v1.md
+judge_max_attempts: 2
+classifier:
+  # TypeSafe Jev: structured classification with calibrated probabilities. To use the LLM classifier
+  # instead: kind llm, configs/judges/anthropic/classifier-claude-opus-5-5.yaml, prompts/classifier-v1.md.
+  kind: structured
+  configuration: configs/judges/typesafe/jev-1.14.0.yaml
+  prompt: configs/evaluation/prompts/jev-architecture-v1.yaml
+  rounds: [1, 4]
+review_selection:
+  fraction: 0.2
+  seed: 1729
+  extremes_per_round: 1
+  disagreement:
+    score_distance: 15
+    dimension_distance: 2
+adjudication:
+  rule: human_precedence
+acceptable:
+  min_adjusted_score: 60
+  status: draft
+scoring_revision: 1

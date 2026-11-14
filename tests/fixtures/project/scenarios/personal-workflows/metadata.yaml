@@ -1,0 +1,33 @@
+# TEST FIXTURE: synthetic four-round scenario for the harness tests. Not the benchmark's scenario.
+scenario_id: personal-workflows
+revision: "fixture-1"
+system_prompt: system.md
+rounds:
+  - round: 1
+    name: baseline
+    prompt: baseline.md
+    required_sections:
+      - Recommended architecture
+      - Important assumptions
+      - Alternatives and trade-offs
+      - Component boundaries
+      - LLM and agent responsibilities
+      - Execution and orchestration
+      - Persistence and state
+      - Security
+      - Reliability
+      - Technology choices
+      - Operating cost
+      - Risks and architectural evolution
+  - round: 2
+    name: reliability
+    prompt: reliability.md
+    parent_round: 1
+  - round: 3
+    name: security
+    prompt: security.md
+    parent_round: 1
+  - round: 4
+    name: evolution
+    prompt: evolution.md
+    parent_round: 1

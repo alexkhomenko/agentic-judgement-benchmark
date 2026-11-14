@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +20,24 @@ from archbench.planning.loader import load_scenario
 from archbench.storage.artifacts import ArtifactStore
 from archbench.storage.database import Database
 
-ROOT = Path(__file__).resolve().parents[1]
+# The tests exercise the harness, not the experiments: every configuration, rubric, catalog, and scenario
+# they read comes from this test-owned tree. The project's own configs/, rubrics/, and scenarios/ belong
+# to the experiments and are not part of the repository's tested code.
+PROJECT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent / "fixtures" / "project"
+EXPERIMENT_DATA = tuple(str(PROJECT / d) + os.sep for d in ("configs", "rubrics", "scenarios"))
 BASE_CONFIG = yaml.safe_load((ROOT / "configs/models/fake/fake-alpha.yaml").read_text())
+
+
+def _refuse_experiment_data(event: str, args: tuple[Any, ...]) -> None:
+    """Fail any test that opens the project's experiment data instead of the fixtures."""
+    if event == "open" and args and isinstance(args[0], str | bytes | os.PathLike):
+        path = os.path.abspath(os.fsdecode(args[0]))
+        if path.startswith(EXPERIMENT_DATA):
+            raise PermissionError(f"tests must not read experiment data ({path}); use tests/fixtures/project")
+
+
+sys.addaudithook(_refuse_experiment_data)
 
 
 @dataclass

@@ -1,0 +1,51 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# GPT-6 Luna candidate, native_recommended profile: provider defaults for reasoning; only
+# max_output_tokens, which the harness requires, is set (same ceiling as the Haiku 5.5 candidate, the
+# same price tier). Limits, defaults, and prices are from developers.openai.com/api/docs/models/gpt-6-luna
+# and developers.openai.com/api/docs/pricing.md, read 2026-11-12. The model page lists `gpt-6-luna` as its
+# only snapshot, so no dated snapshot can be pinned; a response served by another model id is a failure.
+configuration_id: openai-gpt-6-luna
+revision: 1
+track: cloud
+adapter: openai
+provider: openai
+model: gpt-6-luna
+profile: native_recommended
+context_limit: 922000  # documented maximum input tokens (context window 1,050,000 includes output)
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: harness requires an explicit ceiling; includes reasoning tokens. Truncation is recorded, never retried.
+  reasoning_effort:
+    state: omitted
+    documented_default: medium
+    source: native_recommended uses the provider default (model page lists none, low, medium, high, xhigh, max)
+    verified_on: 2026-11-12
+  reasoning_summary:
+    state: omitted
+    source: native_recommended uses the provider default
+  verbosity:
+    state: omitted
+    source: native_recommended uses the provider default
+  temperature:
+    state: unknown
+    source: support not stated on the model page
+adapter_options:
+  timeout_s: 600
+  replay_reasoning: true
+  pricing:
+    input_usd_per_mtok: 0.10
+    cached_input_usd_per_mtok: 0.01
+    cache_write_30m_usd_per_mtok: 0.125
+    cache_write_12h_usd_per_mtok: 0.25
+    output_usd_per_mtok: 0.50
+    long_context:
+      threshold_input_tokens: 272000
+      input_usd_per_mtok: 0.20
+      cached_input_usd_per_mtok: 0.02
+      cache_write_30m_usd_per_mtok: 0.25
+      cache_write_12h_usd_per_mtok: 0.50
+      output_usd_per_mtok: 0.75
+    source: developers.openai.com/api/docs/pricing.md standard tier, read 2026-11-12
+    verified_on: "2026-11-12"

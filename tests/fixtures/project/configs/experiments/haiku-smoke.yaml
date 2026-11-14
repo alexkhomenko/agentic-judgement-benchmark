@@ -1,0 +1,16 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Live pipeline debugging: one real candidate (Claude Haiku 5.5), one repetition
+# (baseline + 3 independent branches = 4 responses). Evaluate with configs/evaluation/anthropic-debug.yaml.
+experiment_id: haiku-smoke-001
+benchmark_revision: "1.2"
+scenario: scenarios/personal-workflows
+rubric: rubrics/personal-workflows/rubric.yaml
+configurations:
+  - configs/models/anthropic/claude-haiku-5-5.yaml
+repetitions: 1
+retry:
+  max_attempts: 3
+  retry_on: [transient_transport, rate_limited, interrupted]
+  selection: first_success
+scheduling:
+  order: as_listed

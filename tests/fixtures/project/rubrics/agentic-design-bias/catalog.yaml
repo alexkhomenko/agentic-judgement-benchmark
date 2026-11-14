@@ -1,0 +1,39 @@
+# TEST FIXTURE: a small catalog of public products and model families for the harness tests. Not the
+# benchmark's catalog. The tests rely on: claude-agent-sdk being the first item (an SDK with an alias),
+# a protocol (mcp) and an approach (no-framework) that never count toward vendor preference, alias
+# overlaps that need longest-match and word boundaries (Claude Agent SDK / Claude, Llama / LlamaIndex,
+# LangGraph / LangChain), and model families with open, closed, and mixed open_weights.
+catalog_id: agentic-design
+revision: "fixture-1"
+status: draft
+verified_on: null
+vendors:
+  anthropic: {candidate_providers: [anthropic]}
+  openai: {candidate_providers: [openai]}
+  google: {candidate_providers: [google]}
+  microsoft: {candidate_providers: [microsoft]}
+  meta: {candidate_providers: [meta]}
+  mistral: {candidate_providers: [mistral]}
+  alibaba: {candidate_providers: [alibaba]}
+  deepseek: {candidate_providers: [deepseek]}
+  xai: {candidate_providers: [xai]}
+  independent: {candidate_providers: []}
+items:
+  - {id: claude-agent-sdk, name: Claude Agent SDK, aliases: [Claude Code SDK], vendor: anthropic, kind: sdk, model_coupling: vendor_model}
+  - {id: mcp, name: Model Context Protocol, aliases: [MCP], vendor: anthropic, kind: protocol, model_coupling: neutral}
+  - {id: openai-agents-sdk, name: OpenAI Agents SDK, vendor: openai, kind: sdk, model_coupling: vendor_model}
+  - {id: google-adk, name: Google Agent Development Kit, aliases: [Google ADK], vendor: google, kind: framework, model_coupling: vendor_model}
+  - {id: autogen, name: AutoGen, vendor: microsoft, kind: framework, model_coupling: neutral}
+  - {id: langgraph, name: LangGraph, vendor: independent, kind: framework, model_coupling: neutral}
+  - {id: langchain, name: LangChain, vendor: independent, kind: framework, model_coupling: neutral}
+  - {id: crewai, name: CrewAI, vendor: independent, kind: framework, model_coupling: neutral}
+  - {id: llamaindex, name: LlamaIndex, vendor: independent, kind: framework, model_coupling: neutral}
+  - {id: no-framework, name: No framework (plain code with a model SDK), vendor: independent, kind: approach, model_coupling: neutral}
+  - {id: claude, name: Claude, aliases: [Claude Opus, Claude Sonnet, Claude Haiku], vendor: anthropic, kind: model, model_coupling: vendor_model, open_weights: false}
+  - {id: gpt, name: GPT, vendor: openai, kind: model, model_coupling: vendor_model, open_weights: false}
+  - {id: gemini, name: Gemini, vendor: google, kind: model, model_coupling: vendor_model, open_weights: false}
+  - {id: llama, name: Llama, vendor: meta, kind: model, model_coupling: vendor_model, open_weights: true}
+  - {id: mistral-models, name: Mistral, vendor: mistral, kind: model, model_coupling: vendor_model, open_weights: null}
+  - {id: qwen, name: Qwen, vendor: alibaba, kind: model, model_coupling: vendor_model, open_weights: null}
+  - {id: deepseek, name: DeepSeek, vendor: deepseek, kind: model, model_coupling: vendor_model, open_weights: true}
+  - {id: grok, name: Grok, vendor: xai, kind: model, model_coupling: vendor_model, open_weights: null}

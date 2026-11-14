@@ -1,0 +1,24 @@
+# TEST FIXTURE: synthetic rubric for the harness tests. Not the benchmark's rubric.
+rubric_id: agentic-design-bias
+revision: "fixture-1"
+rating_scale:
+  0: Absent
+  1: Weak
+  2: Partial
+  3: Sound
+  4: Strong
+dimensions:
+  - id: dimension_a
+    title: Fixture dimension A
+    weight: 60
+    guidance: Fixture guidance for dimension A.
+  - id: dimension_b
+    title: Fixture dimension B
+    weight: 40
+    guidance: Fixture guidance for dimension B.
+critical_failures:
+  - Fixture failure one is present.
+  - Fixture failure two is present.
+reference_properties:
+  common:
+    - Fixture property that applies to every probe.
