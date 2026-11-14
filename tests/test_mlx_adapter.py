@@ -18,7 +18,7 @@ import yaml
 from archbench.adapters.base import AdapterError, InvocationContext, QualificationRequirements
 from archbench.adapters.fake import FakeAdapter
 from archbench.adapters.fake_judge import FakeJudgeAdapter
-from archbench.adapters.local.mlx_lm import MlxLmAdapter, split_thinking
+from archbench.adapters.local.mlx_lm import REQUIRED, MlxLmAdapter, split_thinking
 from archbench.adapters.registry import AdapterRegistry
 from archbench.domain.configuration import ModelConfiguration
 from archbench.domain.execution import CostIncurred, FailureKind
@@ -80,6 +80,20 @@ class FakeProbe:
         return {"system": "Darwin", "chip": "Apple M4", "memory_bytes": 32 * GB, "os_version": "27.2"}
 
 
+class BlindProbe(FakeProbe):
+    """macOS host whose counters all fail to read (`unreadable` limits which ones)."""
+
+    def __init__(self, unreadable: frozenset[str] = frozenset({"pressure_level", "vm_counters"})) -> None:
+        super().__init__()
+        self.unreadable = unreadable
+
+    def pressure_level(self) -> int | None:  # type: ignore[override]
+        return None if "pressure_level" in self.unreadable else super().pressure_level()
+
+    def vm_counters(self) -> dict[str, int] | None:  # type: ignore[override]
+        return None if "vm_counters" in self.unreadable else super().vm_counters()
+
+
 class FakeWorker:
     """Speaks the worker protocol in-process. Completions are '<reasoning>\\n</think>\\n\\n<answer>'."""
 
@@ -87,8 +101,9 @@ class FakeWorker:
 
     def __init__(self, python: str, *, versions: dict[str, Any] | None = None, answer: str = "Use Qwen.",
                  finish: str = "stop", think_closed: bool = True, load_error: dict[str, Any] | None = None,
-                 fail_generate: Exception | None = None) -> None:
+                 fail_generate: Exception | None = None, thinking_markers: bool = True) -> None:
         self.python, self.answer, self.finish, self.think_closed = python, answer, finish, think_closed
+        self.thinking_markers = thinking_markers
         self.versions = versions if versions is not None else dict(CONFIG.adapter_options["engine"])  # type: ignore[arg-type]
         self.load_error, self.fail_generate = load_error, fail_generate
         self.requests: list[dict[str, Any]] = []
@@ -118,8 +133,12 @@ class FakeWorker:
                 "model": {"class": "mlx_lm.models.qwen3_5.Model", "parameters": 8953801728, "bits_per_weight": 4.5,
                           "quantization": {"bits": 4, "group_size": 64, "mode": "affine"},
                           "max_position_embeddings": 262144},
-                "tokenizer": {"eos_token_ids": [EOS], "think_start": "<think>", "think_end": "</think>",
-                              "think_start_token_ids": [248068], "think_end_token_ids": [THINK_END_ID],
+                "tokenizer": {"eos_token_ids": [EOS],
+                              **({"think_start": "<think>", "think_end": "</think>",
+                                  "think_start_token_ids": [248068], "think_end_token_ids": [THINK_END_ID]}
+                                 if self.thinking_markers else
+                                 {"think_start": None, "think_end": None,
+                                  "think_start_token_ids": None, "think_end_token_ids": None}),
                               "chat_template_sha256": CONFIG.adapter_options["files"]["chat_template.jinja"]},  # type: ignore[index,call-overload]
                 "engine_settings": {"prefill_step_size": 2048}}}
         if self.fail_generate is not None:
@@ -133,7 +152,11 @@ class FakeWorker:
                 "kv_cache": {"bytes": GB}, "timing": {"prefill_ms": 90000.0, "engine_prompt_tps": 320.0}}}
         thinking = message.get("chat_template_kwargs", {}).get("enable_thinking", True) is not False
         rendered = "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in message["messages"])
-        rendered += "<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
+        if not self.thinking_markers:  # the template knows nothing about thinking
+            thinking = False
+            rendered += "<|im_start|>assistant\n"
+        else:
+            rendered += "<|im_start|>assistant\n" + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
         prompt_ids = list(range(len(rendered) // 4))
         if len(prompt_ids) + message["max_tokens"] > message["context_window"]:
             return {"ok": False, "error": {"type": "context_exceeded", "message": "too long",
@@ -339,11 +362,30 @@ def test_qualification_covers_engine_checkpoint_decoding_continuation_and_memory
     assert {p["step"] for p in report.probes} == {"baseline", "branch-alpha", "branch-beta", "memory-preflight"}
 
 
+@pytest.mark.parametrize("thinking", [None, False])
+def test_models_without_thinking_markers_qualify_unless_thinking_is_enabled(thinking: bool | None) -> None:
+    config = CONFIG if thinking is None else with_param("enable_thinking", {"state": "explicit", "value": thinking})
+    report = adapter(thinking_markers=False).qualify(config, REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    assert "reasoning 0 chars" in checks["output_decoding"].detail
+
+
+def test_enabling_thinking_without_markers_fails_model_identity() -> None:
+    config = with_param("enable_thinking", {"state": "explicit", "value": True})
+    checks = {c.name: c for c in adapter(thinking_markers=False).qualify(config, REQUIREMENTS).checks}
+    assert checks["model_identity"].passed is False
+    assert "no thinking markers" in checks["model_identity"].detail
+
+
 @pytest.mark.parametrize(("mlx", "failing"), [
     (adapter(versions={**CONFIG.adapter_options["engine"], "mlx": "0.31.0"}), "engine_identity"),  # type: ignore[dict-item]
     (adapter(load_error={"type": "checkpoint_mismatch", "message": "x"}), "model_identity"),
     (adapter(probe=FakeProbe(swapout_pages=10_000)), "memory_preflight"),  # ~150 MB swapped out
     (adapter(probe=FakeProbe(level=4)), "memory_preflight"),  # critical pressure
+    (adapter(probe=BlindProbe()), "memory_preflight"),  # no host readings at all
+    (adapter(probe=BlindProbe(frozenset({"vm_counters"}))), "memory_preflight"),  # swap unknown
+    (adapter(probe=BlindProbe(frozenset({"pressure_level"}))), "memory_preflight"),  # pressure unknown
     (adapter(answer="unused", think_closed=False, finish="length"), "output_decoding"),
 ])
 def test_qualification_failures(mlx: MlxLmAdapter, failing: str) -> None:
@@ -361,6 +403,15 @@ def test_missing_pins_stop_qualification_before_starting_a_worker() -> None:
     config = CONFIG.model_copy(update={"adapter_options": {**CONFIG.adapter_options, "files": {}}})
     checks = {c.name: c for c in adapter().qualify(config, REQUIREMENTS).checks}
     assert checks["configuration_pins"].passed is False and not FakeWorker.instances
+
+
+@pytest.mark.parametrize("name", sorted(REQUIRED))
+def test_missing_required_parameters_stop_qualification_before_starting_a_worker(name: str) -> None:
+    report = adapter().qualify(with_param(name, None), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed and not report.probes and not FakeWorker.instances
+    assert checks["parameter_support"].passed is False and name in checks["parameter_support"].detail
+    assert checks["engine_identity"].passed is None
 
 
 def test_memory_sampler_reports_deltas_and_survives_without_a_process() -> None:

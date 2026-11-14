@@ -191,8 +191,9 @@ class MlxLmAdapter:
             QualificationCheck(name="configuration_pins", passed=not pins, detail="; ".join(pins) or "ok"),
         ]
         probes: list[dict[str, Any]] = []
-        if pins:
-            checks.append(QualificationCheck(name="engine_identity", passed=None, detail="not evaluated: pins missing"))
+        if pins or missing:  # probes need the pins and the required parameters
+            reason = "pins missing" if pins else f"required parameters missing: {missing}"
+            checks.append(QualificationCheck(name="engine_identity", passed=None, detail=f"not evaluated: {reason}"))
             return QualificationReport.from_checks(config, self.name, requirements, checks, probes)
         with self._lock:
             session: _Session | None = None
@@ -213,7 +214,7 @@ class MlxLmAdapter:
             limits = [v for v in (window, max_position) if isinstance(v, int)]
             checks.append(context_check(config, requirements, min(limits) if limits else None))
             if requirements.requires_continuation and model_check.passed:
-                checks.extend(self._continuation_checks(config, probes))
+                checks.extend(self._continuation_checks(config, session, probes))
                 checks.append(self._memory_preflight(config, probes))
         return QualificationReport.from_checks(config, self.name, requirements, checks, probes)
 
@@ -245,8 +246,8 @@ class MlxLmAdapter:
             problems.append("the tokenizer's chat template is not the snapshot's chat_template.jinja")
         if not tokenizer.get("chat_template_sha256"):
             problems.append("checkpoint has no chat template")
-        if explicit(config, "enable_thinking") is not None and not tokenizer.get("think_end"):
-            problems.append("enable_thinking is set but the tokenizer has no thinking markers")
+        if explicit(config, "enable_thinking") is True and not tokenizer.get("think_end"):
+            problems.append("enable_thinking is true but the tokenizer has no thinking markers")
         quant = model.get("quantization") or {}
         return QualificationCheck(
             name="model_identity", passed=not problems,
@@ -262,7 +263,7 @@ class MlxLmAdapter:
                 f"{load.get('load_ms')} ms, warm-up {(load.get('warmup') or {}).get('ms')} ms"),
         ), max_position if isinstance(max_position, int) else None
 
-    def _continuation_checks(self, config: ModelConfiguration, probes: list[dict[str, Any]]
+    def _continuation_checks(self, config: ModelConfiguration, session: _Session, probes: list[dict[str, Any]]
                              ) -> list[QualificationCheck]:
         """A baseline and two sibling follow-ups forked from it (spec 6.3 items 3-6)."""
         budget = explicit(config, "max_output_tokens")
@@ -330,7 +331,7 @@ class MlxLmAdapter:
                                                       detail="forking mutated baseline state")
         except AdapterError as exc:
             continuation = QualificationCheck(name="continuation", passed=False, detail=str(exc))
-        return [continuation, _decoding_check(config, outputs)]
+        return [continuation, _decoding_check(config, session.load.get("tokenizer") or {}, outputs)]
 
     def _memory_preflight(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
         """Fill the full context window (prompt + output) and require no severe pressure or swapping."""
@@ -380,10 +381,15 @@ class MlxLmAdapter:
         swapouts, level = host_memory.get("swapouts_bytes"), host_memory.get("pressure_level_max")
         if not host_memory.get("available"):
             problems.append(str(host_memory.get("reason")))
-        if isinstance(swapouts, int) and swapouts > max_swapout:
-            problems.append(f"swapped out {_mb(swapouts)} MB (limit {_mb(max_swapout)} MB)")
-        if isinstance(level, int) and level > max_level:
-            problems.append(f"memory pressure reached {host_memory.get('pressure_max')}")
+        else:  # a missing reading cannot show the host stayed within limits
+            if not isinstance(swapouts, int):
+                problems.append("swap-out counters unavailable")
+            elif swapouts > max_swapout:
+                problems.append(f"swapped out {_mb(swapouts)} MB (limit {_mb(max_swapout)} MB)")
+            if not isinstance(level, int):
+                problems.append("memory pressure level unavailable")
+            elif level > max_level:
+                problems.append(f"memory pressure reached {host_memory.get('pressure_max')}")
         memory, timing = result.get("memory") or {}, result.get("timing") or {}
         return QualificationCheck(
             name="memory_preflight", passed=not problems,
@@ -571,11 +577,14 @@ def split_thinking(text: str, tokenizer: dict[str, Any], opened: bool) -> tuple[
     return None, text.strip()
 
 
-def _decoding_check(config: ModelConfiguration, outputs: list[tuple[str, NativeExecution, ExtractedResponse | None]]
-                    ) -> QualificationCheck:
-    """Probe answers decode to the requested word, stop on an end-of-turn token, and parse thinking."""
+def _decoding_check(config: ModelConfiguration, tokenizer: dict[str, Any],
+                    outputs: list[tuple[str, NativeExecution, ExtractedResponse | None]]) -> QualificationCheck:
+    """Probe answers decode to the requested word, stop on an end-of-turn token, and parse thinking.
+
+    Thinking is expected only when the tokenizer has thinking markers and the configuration does not disable it.
+    """
     problems, notes = [], []
-    thinking_expected = explicit(config, "enable_thinking") is not False
+    thinking_expected = bool(tokenizer.get("think_end")) and explicit(config, "enable_thinking") is not False
     for step, execution, extracted in outputs:
         word = "baseline" if step == "baseline" else step.removeprefix("branch-")
         if extracted is None:
