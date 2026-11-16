@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -44,6 +44,14 @@ separately; a cache write reported without that TTL split has unknown cost.
 The GLM adapter (`adapter: glm`, `provider: zhipu`) uses Z.ai's standard Chat Completions endpoint,
 rejects Coding Plan endpoints during qualification, and replays complete assistant messages including
 `reasoning_content`. It checks the served model id on each response and prices cache hits and misses separately.
+
+The Cohere adapter (`adapter: cohere`) uses the native Chat API v2 (`/v2/chat`), not the OpenAI Compatibility API.
+Responses do not name the model, so qualification checks the dated id against `GET /v1/models/{model}` (chat
+support, deprecation, context length, and sampling defaults). Cohere caps `max_tokens` silently, so configurations
+state the model's output limit. Assistant messages are replayed exactly, thinking blocks included. Cost is priced
+on `usage.billed_units`. Cohere inserts a safety instruction into every prompt (`safety_mode` CONTEXTUAL by
+default; Command A models have no OFF), which the configuration discloses. On Command A+ even production keys are
+limited to 1,000 chat calls a month, and trial keys may not be used commercially.
 
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
@@ -113,7 +121,7 @@ captured traffic, and any artifact, record, or frozen config containing a loaded
 string is rejected rather than written. Use `--secrets PATH` for a file elsewhere. Without the file,
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
 `GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi;
-`ZAI_API_KEY` for GLM).
+`ZAI_API_KEY` for GLM; `CO_API_KEY` for Cohere).
 
 ## Live debugging run
 
