@@ -63,6 +63,7 @@ def test_documented_template_copy_loads(tmp_path: Path) -> None:
     write_secrets(project, (Path(__file__).parents[1] / "secrets.example.yaml").read_text())
     secrets = load_local_secrets(project)
     assert secrets.api_key("anthropic") == "<your Anthropic API key>"
+    assert secrets.api_key("zhipu") == "<your Z.ai API key>"
 
 
 def test_readable_by_others_is_refused(tmp_path: Path) -> None:
@@ -136,13 +137,24 @@ def test_cli_refuses_unsafe_secrets_file(tmp_path: Path, capsys: pytest.CaptureF
     assert "chmod 600" in err and KEY not in err
 
 
-def test_typesafe_key_from_file_or_environment_is_guarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("provider", "adapter_name", "env_var"), [
+    ("typesafe", "typesafe", "TYPESAFE_API_KEY"),
+    ("zhipu", "glm", "ZAI_API_KEY"),
+])
+def test_provider_key_from_file_or_environment_is_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, adapter_name: str, env_var: str,
+) -> None:
+    local_key = f"{provider}-local-file-key-123"
+    environment_key = f"{provider}-environment-key-456"
+    monkeypatch.setenv(env_var, environment_key)
     project = repo(tmp_path)
-    write_secrets(project, f'typesafe:\n  api_key: "ts-local-file-key-123"\n')
+    write_secrets(project, f'{provider}:\n  api_key: "{local_key}"\n')
     secrets = load_local_secrets(project)
-    assert default_registry(secrets).get("typesafe")._api_key == "ts-local-file-key-123"  # type: ignore[attr-defined]
-    assert GUARD.find("leak ts-local-file-key-123") == "a loaded credential value"
+    assert secrets.api_key(provider) == local_key
+    assert local_key not in repr(secrets) and local_key not in str(secrets)
+    assert default_registry(secrets).get(adapter_name)._api_key == local_key  # type: ignore[attr-defined]
+    assert GUARD.find(f"leak {local_key}") == "a loaded credential value"
+    assert os.environ[env_var] == environment_key  # the file key was not exported
     GUARD.clear()
-    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-environment-key-456")
-    assert default_registry().get("typesafe")._api_key == "ts-environment-key-456"  # type: ignore[attr-defined]
-    assert GUARD.find("leak ts-environment-key-456") == "a loaded credential value"
+    assert default_registry().get(adapter_name)._api_key == environment_key  # type: ignore[attr-defined]
+    assert GUARD.find(f"leak {environment_key}") == "a loaded credential value"
