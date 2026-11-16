@@ -23,7 +23,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 DEFAULT_SECRETS_FILE = "secrets.local.yaml"
-PROVIDERS = ("anthropic", "deepseek", "google", "mistral", "moonshot", "openai", "typesafe", "xai", "zhipu")
+PROVIDERS = ("anthropic", "deepseek", "google", "minimax", "mistral", "moonshot", "openai", "typesafe", "xai", "zhipu")
 KEY_PATTERNS = (
     re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
@@ -52,6 +52,7 @@ class LocalSecrets(BaseModel):
     anthropic: ProviderCredentials | None = None
     deepseek: ProviderCredentials | None = None
     google: ProviderCredentials | None = None
+    minimax: ProviderCredentials | None = None
     mistral: ProviderCredentials | None = None
     moonshot: ProviderCredentials | None = None
     openai: ProviderCredentials | None = None

@@ -12,6 +12,7 @@ from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
 from .cloud.glm_chat import GlmAdapter
 from .cloud.kimi_chat import KimiAdapter
+from .cloud.minimax_messages import MiniMaxAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
 from .cloud.typesafe_jev import TypeSafeAdapter
@@ -63,6 +64,10 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     zhipu_key = secrets.api_key("zhipu") or os.environ.get("ZAI_API_KEY") or None
     if zhipu_key:
         GUARD.register(zhipu_key)
+    # Never ANTHROPIC_API_KEY: MiniMax's Anthropic-compatible API must not receive an Anthropic credential.
+    minimax_key = secrets.api_key("minimax") or os.environ.get("MINIMAX_API_KEY") or None
+    if minimax_key:
+        GUARD.register(minimax_key)
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
@@ -77,6 +82,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
         "glm": GlmAdapter(api_key=zhipu_key),
         "kimi": KimiAdapter(api_key=moonshot_key),
+        "minimax": MiniMaxAdapter(api_key=minimax_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),
