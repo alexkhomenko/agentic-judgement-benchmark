@@ -24,13 +24,16 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 DEFAULT_SECRETS_FILE = "secrets.local.yaml"
 PROVIDERS = (
-    "anthropic", "cohere", "deepseek", "google", "minimax", "mistral", "moonshot", "openai", "typesafe", "xai", "zhipu",
+    "anthropic", "bedrock", "cohere", "deepseek", "google", "minimax", "mistral", "moonshot", "openai", "typesafe",
+    "xai", "zhipu",
 )
 KEY_PATTERNS = (
     re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),  # Google API keys
     re.compile(r"\bxai-[A-Za-z0-9]{20,}"),  # xAI API keys
+    re.compile(r"\bABSKQmVkcm9ja0FQSUtleS[A-Za-z0-9+/]{8,}"),  # Amazon Bedrock long-term API keys
+    re.compile(r"\bbedrock-api-key-[A-Za-z0-9+/=_-]{20,}"),  # Amazon Bedrock short-term API keys
 )
 
 
@@ -52,6 +55,7 @@ class LocalSecrets(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     anthropic: ProviderCredentials | None = None
+    bedrock: ProviderCredentials | None = None
     cohere: ProviderCredentials | None = None
     deepseek: ProviderCredentials | None = None
     google: ProviderCredentials | None = None

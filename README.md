@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Amazon Bedrock Converse adapter (Amazon Nova models only) done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -59,6 +59,17 @@ state the model's output limit. Assistant messages are replayed exactly, thinkin
 on `usage.billed_units`. Cohere inserts a safety instruction into every prompt (`safety_mode` CONTEXTUAL by
 default; Command A models have no OFF), which the configuration discloses. On Command A+ even production keys are
 limited to 1,000 chat calls a month, and trial keys may not be used commercially.
+
+The Bedrock adapter (`adapter: bedrock`, `provider: bedrock`) calls Amazon Bedrock's Converse API with plain HTTP
+and a Bedrock API key (`Authorization: Bearer`), not boto3 and SigV4 credentials. It serves Amazon's own models
+only: Bedrock also hosts other vendors' models, which this harness calls through their own APIs, and the bias
+report maps `provider: bedrock` to AWS. `adapter_options.region` is required and must be a Region that accepts
+API keys (not us-east-2 or us-west-1). Responses do not name the model, so qualification checks the inference
+profile and foundation model on the control plane (Amazon provider, ACTIVE lifecycle) and records the Regions
+a cross-Region profile may route to; which Region served a request is not reported. Nova's built-in content
+filters cannot be configured; a blocked prompt or output is a refusal. Assistant messages are replayed exactly,
+reasoning blocks included (Nova 2 returns reasoning text as `[REDACTED]`). Cost counts cache reads and writes
+separately and is checked against `totalTokens`.
 
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
@@ -128,7 +139,7 @@ captured traffic, and any artifact, record, or frozen config containing a loaded
 string is rejected rather than written. Use `--secrets PATH` for a file elsewhere. Without the file,
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
 `GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi;
-`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere).
+`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere; `AWS_BEARER_TOKEN_BEDROCK` for Bedrock).
 
 ## Live debugging run
 
