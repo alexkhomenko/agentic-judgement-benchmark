@@ -1,0 +1,46 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Muse Spark 1.3 candidate: Meta's mid-tier Muse model ("agentic and coding work at scale"), which Meta lists as
+# "recommended for new work"; Muse Wonder (flagship, preview) is above it and Muse Ember (high-volume) below.
+# Called on the Meta Model API's Responses endpoint (api.meta.ai/v1), Meta's recommended protocol.
+# STANDARD TIER: the `-contributor` ids share the key but let Meta train on inputs and outputs; the adapter
+# rejects them. Standard-tier content is not used for training.
+# SERVER-SIDE PROMPT CHANGE: Meta injects a hidden system prompt and a default developer message into every
+# request (not billed, not counted in usage, no documented opt-out); this is disclosed, not avoidable.
+# Meta publishes no dated snapshots; responses echo the requested id. Reasoning is always on (default effort high)
+# and is returned only as encrypted content, replayed exactly on follow-ups.
+# native_recommended profile: provider defaults; only max_output_tokens is set. Facts from dev.meta.ai/docs
+# (models, choose-a-model, muse-spark, reasoning, protocols/responses, api-reference/responses, error-handling,
+# authentication, pricing-rate-limits) and dev.meta.ai/legal/commitments, read 2026-11-16.
+configuration_id: muse-spark-1.3
+revision: 1
+track: cloud
+adapter: meta
+provider: meta
+model: muse-spark-1.3
+profile: native_recommended
+context_limit: 1048576  # docs/models; the maximum output is not published for Spark
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; includes reasoning tokens, so a low cap can truncate the visible answer
+  reasoning_effort:
+    state: omitted
+    documented_default: high
+    source: native_recommended uses the provider default (docs/reasoning; none is rejected, max is supported on Spark 1.3)
+    verified_on: 2026-11-16
+  temperature:
+    state: omitted
+    documented_default: 1
+    source: native_recommended uses the provider default (api-reference/responses)
+    verified_on: 2026-11-16
+adapter_options:
+  timeout_s: 900  # Meta returns 504 when a non-streaming request runs too long; the limit is not published
+  replay_reasoning: true
+  pricing:
+    # Per 1M tokens, Standard tier. No long-context premium for Spark. Reasoning is billed as output.
+    input_usd_per_mtok: 1.25
+    cached_input_usd_per_mtok: 0.15
+    output_usd_per_mtok: 4.25
+    source: dev.meta.ai/docs/pricing-rate-limits (Muse Spark 1.3/1.2/1.1 Standard), read 2026-11-16
+    verified_on: "2026-11-16"
