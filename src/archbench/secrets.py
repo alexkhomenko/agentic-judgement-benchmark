@@ -24,7 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 DEFAULT_SECRETS_FILE = "secrets.local.yaml"
 PROVIDERS = (
-    "anthropic", "cohere", "deepseek", "google", "minimax", "mistral", "moonshot", "openai", "typesafe", "xai", "zhipu",
+    "anthropic", "cohere", "deepseek", "google", "microsoft", "minimax", "mistral", "moonshot", "openai", "typesafe",
+    "xai", "zhipu",
 )
 KEY_PATTERNS = (
     re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
@@ -55,6 +56,7 @@ class LocalSecrets(BaseModel):
     cohere: ProviderCredentials | None = None
     deepseek: ProviderCredentials | None = None
     google: ProviderCredentials | None = None
+    microsoft: ProviderCredentials | None = None
     minimax: ProviderCredentials | None = None
     mistral: ProviderCredentials | None = None
     moonshot: ProviderCredentials | None = None

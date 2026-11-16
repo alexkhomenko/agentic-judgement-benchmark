@@ -13,6 +13,7 @@ from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
 from .cloud.glm_chat import GlmAdapter
 from .cloud.kimi_chat import KimiAdapter
+from .cloud.mai_chat import MaiAdapter
 from .cloud.minimax_messages import MiniMaxAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
@@ -75,6 +76,14 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
+    # Microsoft Foundry resource key for the MAI route (the variable Microsoft's MAI samples use).
+    microsoft_key = secrets.api_key("microsoft") or os.environ.get("AZURE_API_KEY") or None
+    if microsoft_key:
+        GUARD.register(microsoft_key)
+    # Microsoft Foundry resource key for the MAI route (the variable Microsoft's MAI samples use).
+    microsoft_key = secrets.api_key("microsoft") or os.environ.get("AZURE_API_KEY") or None
+    if microsoft_key:
+        GUARD.register(microsoft_key)
     return AdapterRegistry({
         "fake": FakeAdapter(),
         "fake-judge": FakeJudgeAdapter(),
@@ -88,6 +97,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "kimi": KimiAdapter(api_key=moonshot_key),
         "minimax": MiniMaxAdapter(api_key=minimax_key),
         "cohere": CohereAdapter(api_key=cohere_key),
+        "mai": MaiAdapter(api_key=microsoft_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),

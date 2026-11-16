@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Microsoft MAI adapter (MAI-Thinking-1 on Foundry, preview) done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -59,6 +59,17 @@ state the model's output limit. Assistant messages are replayed exactly, thinkin
 on `usage.billed_units`. Cohere inserts a safety instruction into every prompt (`safety_mode` CONTEXTUAL by
 default; Command A models have no OFF), which the configuration discloses. On Command A+ even production keys are
 limited to 1,000 chat calls a month, and trial keys may not be used commercially.
+
+The MAI adapter (`adapter: mai`, `provider: microsoft`) calls Microsoft's own MAI models on the `/mai/v1/chat/completions`
+route of a Microsoft Foundry resource you deploy into, with the resource key in the `api-key` header. Set
+`adapter_options.base_url` to your resource endpoint (`https://<resource>.services.ai.azure.com`); `model` is the
+deployment name. MAI-Thinking-1 is a preview without an SLA, and the default quota tier is 0 tokens per minute, so
+calls return 429 until the subscription has a higher tier. The deployment's model version cannot be read with an API
+key, so the configuration declares it; every response must name the deployment or the declared model. Only
+`max_completion_tokens` is documented, so no sampling or reasoning parameters are configurable. Reasoning is
+requested as encrypted content and replayed exactly with each assistant message. Microsoft screens every prompt and
+output; a block (HTTP 400 or finish reason "content filter") is a refusal. No cached-input price is published, so
+a response with cached prompt tokens has unknown cost until one is configured.
 
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
@@ -128,7 +139,7 @@ captured traffic, and any artifact, record, or frozen config containing a loaded
 string is rejected rather than written. Use `--secrets PATH` for a file elsewhere. Without the file,
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
 `GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi;
-`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere).
+`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere; `AZURE_API_KEY` for MAI).
 
 ## Live debugging run
 
