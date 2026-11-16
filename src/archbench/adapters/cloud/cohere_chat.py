@@ -325,8 +325,9 @@ class CohereAdapter:
 
         header_id = _request_id(response.headers)
         if response.status_code != 200:
-            kind, cost = _http_failure(response.status_code)
-            return failed(kind, f"http_{response.status_code}", _error_message(response), cost,
+            message = _error_message(response)
+            kind, cost = _http_failure(response.status_code, message)
+            return failed(kind, f"http_{response.status_code}", message, cost,
                           status=response.status_code, request_id=header_id or _error_body(response).get("id"))
         if json.loads(transport.exchanges[-1]["request_body"]) != body:
             raise AdapterError(FailureKind.HARNESS_ERROR, "request body on the wire differs from the prepared body",
@@ -439,7 +440,18 @@ def _error_message(response: httpx2.Response) -> str:
     return str(message)[:500] if message else response.text[:500]
 
 
-def _http_failure(status: int) -> tuple[FailureKind, CostIncurred]:
+def _is_context_overflow(message: str) -> bool:
+    """Cohere reports prompt overflow as a 400 whose message starts "too many tokens:" ("total number of tokens in
+    the prompt cannot exceed", "size limit exceeded by", "minimal context could not be added", "multi-hop prompt is
+    too long"). The same prefix also covers "max tokens must be less than or equal to ...": that is an invalid output
+    budget, a configuration error, so it is excluded."""
+    text = message.lower()
+    return text.startswith("too many tokens:") and "max tokens must be" not in text
+
+
+def _http_failure(status: int, message: str = "") -> tuple[FailureKind, CostIncurred]:
+    if status == 400 and _is_context_overflow(message):
+        return FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO
     if status == 498:  # a deny-listed token in the request or the generated response
         return FailureKind.REFUSAL, CostIncurred.UNKNOWN
     if status == 429:

@@ -167,6 +167,19 @@ def error(status: int, message: str = "nope") -> httpx2.Response:
 
 @pytest.mark.parametrize(("reply", "kind", "cost"), [
     (error(400), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
+    # Cohere's documented prompt-overflow messages (docs.cohere.com/reference/errors)
+    (error(400, "too many tokens: total number of tokens in the prompt cannot exceed 4081 - received 4292. "
+                "Try using a shorter prompt, or enabling prompt truncating."),
+     FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO),
+    (error(400, "too many tokens: size limit exceeded by 11326 tokens. Try using shorter or fewer inputs, "
+                "or setting prompt_truncation='AUTO'."), FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO),
+    (error(400, "too many tokens: minimal context could not be added to prompt (size limit exceeded by 280 tokens)"),
+     FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO),
+    (error(400, "too many tokens: multi-hop prompt is too long even after truncation"),
+     FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO),
+    # an invalid output budget shares the prefix but is a configuration error
+    (error(400, "too many tokens: max tokens must be less than or equal to 4096, the maximum output for this model "
+                "- received 8192."), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
     (error(401), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
     (error(402), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
     (error(404), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
