@@ -95,23 +95,28 @@ class OllamaAdapter:
         engine_check, model_check, model_context = self._identity_checks(config)
         window = explicit(config, "context_window")
         limit = min(v for v in (window, model_context) if isinstance(v, int)) if isinstance(window, int) else None
+        parameter_check = QualificationCheck(
+            name="parameter_support", passed=not unsupported and not missing,
+            detail=(f"unsupported: {unsupported}" if unsupported else "")
+            + (f" must be explicit: {missing}" if missing else "") or "ok",
+        )
         checks = [
             QualificationCheck(
                 name="adapter_identity", passed=config.adapter == self.name and config.track is Track.LOCAL,
                 detail=f"adapter={config.adapter} track={config.track} provider={config.provider}",
             ),
-            QualificationCheck(
-                name="parameter_support", passed=not unsupported and not missing,
-                detail=(f"unsupported: {unsupported}" if unsupported else "")
-                + (f" must be explicit: {missing}" if missing else "") or "ok",
-            ),
+            parameter_check,
             engine_check,
             model_check,
             context_check(config, requirements, limit),
         ]
         probes: list[dict[str, Any]] = []
         if requirements.requires_continuation:
-            if model_check.passed is not True or engine_check.passed is not True:
+            # Probes are built from the configured parameters: send none for an invalid configuration.
+            if parameter_check.passed is not True:
+                checks.append(QualificationCheck(name="continuation", passed=None,
+                                                 detail="not evaluated: configuration parameters are invalid"))
+            elif model_check.passed is not True or engine_check.passed is not True:
                 checks.append(QualificationCheck(name="continuation", passed=None,
                                                  detail="not evaluated: engine or model identity was not verified"))
             else:

@@ -57,6 +57,14 @@ def test_safe_file_loads_without_exposing_the_key(tmp_path: Path, monkeypatch: p
     ) is None
 
 
+def test_documented_template_copy_loads(tmp_path: Path) -> None:
+    """The README setup (copy secrets.example.yaml) must load: every provider in it needs a credentials field."""
+    project = repo(tmp_path)
+    write_secrets(project, (Path(__file__).parents[1] / "secrets.example.yaml").read_text())
+    secrets = load_local_secrets(project)
+    assert secrets.api_key("anthropic") == "<your Anthropic API key>"
+
+
 def test_readable_by_others_is_refused(tmp_path: Path) -> None:
     project = repo(tmp_path)
     write_secrets(project, mode=0o644)

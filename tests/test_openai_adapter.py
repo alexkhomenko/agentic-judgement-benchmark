@@ -291,6 +291,18 @@ def test_qualification_rejects_unsupported_parameters() -> None:
     assert {c.name: c.passed for c in report.checks}["parameter_support"] is False
 
 
+def test_missing_output_budget_skips_continuation_probes() -> None:
+    data = CONFIG.model_dump(mode="json")
+    del data["parameters"]["max_output_tokens"]
+    mock = MockOpenAI()
+    report = OpenAIAdapter(api_key=API_KEY, transport_factory=lambda: httpx2.MockTransport(mock)).qualify(ModelConfiguration.model_validate(data), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed
+    assert checks["parameter_support"].passed is False and "max_output_tokens" in checks["parameter_support"].detail
+    assert checks["continuation"].passed is None and "parameters are invalid" in checks["continuation"].detail
+    assert all(r.method == "GET" for r in mock.requests)
+
+
 def test_openai_candidate_in_a_cross_vendor_p6_run(env: Env) -> None:
     mock = MockOpenAI()
     registry = AdapterRegistry({
