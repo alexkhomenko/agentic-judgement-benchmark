@@ -279,6 +279,26 @@ def test_qualification_rejects_fixed_sampling_parameters() -> None:
     assert checks["parameter_support"].passed is False and "temperature" in checks["parameter_support"].detail
 
 
+@pytest.mark.parametrize(("name", "state", "expected"), [
+    ("max_output_tokens", None, "max_output_tokens must be explicit"),
+    ("max_output_tokens", {"state": "omitted"}, "max_output_tokens must be explicit"),
+    ("temperature", {"state": "explicit", "value": 0.2}, "temperature"),
+])
+def test_invalid_parameters_skip_continuation_probes(name: str, state: dict[str, Any] | None, expected: str) -> None:
+    data = CONFIG.model_dump(mode="json")
+    if state is None:
+        del data["parameters"][name]
+    else:
+        data["parameters"][name] = state
+    mock = MockKimi()
+    report = mock.adapter().qualify(ModelConfiguration.model_validate(data), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed
+    assert checks["parameter_support"].passed is False and expected in checks["parameter_support"].detail
+    assert checks["continuation"].passed is None and "parameters are invalid" in checks["continuation"].detail
+    assert [r.url.path for r in mock.requests] == ["/v1/models"]
+
+
 @pytest.mark.parametrize(("listed", "expected"), [
     ({"id": "kimi-other"}, "not listed"),
     ({"context_length": 262144}, "context_limit"),

@@ -185,6 +185,21 @@ def test_evaluation_refuses_to_start_without_credentials(env: Env, monkeypatch: 
     assert len(env.db.list_records()) == before  # nothing frozen
 
 
+def test_missing_output_budget_skips_continuation_probes() -> None:
+    data = CONFIG.model_dump(mode="json")
+    del data["parameters"]["max_output_tokens"]
+    mock = Recorder(ok({"id": "claude-opus-5-5", "type": "model", "display_name": "x",
+                   "created_at": "2026-01-01T00:00:00Z", "max_input_tokens": 1000000,
+                   "max_tokens": 128000}))
+    report = mock.adapter().qualify(ModelConfiguration.model_validate(data), QualificationRequirements(
+        baseline_prompt_chars=1, longest_follow_up_chars=1, output_budget_tokens=1))
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed
+    assert checks["parameter_support"].passed is False and "max_output_tokens" in checks["parameter_support"].detail
+    assert checks["continuation"].passed is None and "parameters are invalid" in checks["continuation"].detail
+    assert all(r.method == "GET" for r in mock.requests)
+
+
 def test_unsupported_parameters_fail_qualification(tmp_path: Path) -> None:
     data = CONFIG.model_dump(mode="json")
     data["parameters"]["temperature"] = {"state": "explicit", "value": 0.2}

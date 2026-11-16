@@ -214,6 +214,18 @@ def test_qualification_failures(engine: MockOllama, failing: str) -> None:
     assert checks[failing] is False
 
 
+def test_missing_output_budget_skips_continuation_probes() -> None:
+    data = CONFIG.model_dump(mode="json")
+    del data["parameters"]["max_output_tokens"]
+    mock = MockOllama()
+    report = mock.adapter().qualify(ModelConfiguration.model_validate(data), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed
+    assert checks["parameter_support"].passed is False and "max_output_tokens" in checks["parameter_support"].detail
+    assert checks["continuation"].passed is None and "parameters are invalid" in checks["continuation"].detail
+    assert not [r for r in mock.requests if r.url.path == "/api/chat"]
+
+
 def test_context_window_must_be_explicit() -> None:
     data = CONFIG.model_dump(mode="json")
     del data["parameters"]["context_window"]

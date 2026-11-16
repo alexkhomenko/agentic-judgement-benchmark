@@ -217,6 +217,18 @@ def test_continuation_replays_the_message_exactly(tmp_path: Path) -> None:
         adapter.prepare(CONFIG.model_copy(update={"model": "deepseek-v4-pro"}), follow, snapshot, ctx(2))
 
 
+def test_missing_output_budget_skips_continuation_probes() -> None:
+    data = CONFIG.model_dump(mode="json")
+    del data["parameters"]["max_output_tokens"]
+    mock = MockDeepSeek()
+    report = mock.adapter().qualify(ModelConfiguration.model_validate(data), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed
+    assert checks["parameter_support"].passed is False and "max_output_tokens" in checks["parameter_support"].detail
+    assert checks["continuation"].passed is None and "parameters are invalid" in checks["continuation"].detail
+    assert all(r.method == "GET" for r in mock.requests)
+
+
 def test_qualification_records_the_served_build() -> None:
     report = MockDeepSeek().adapter().qualify(CONFIG, REQUIREMENTS)
     checks = {c.name: c for c in report.checks}
