@@ -4,6 +4,7 @@ an offline P6 run with a Kimi candidate next to a candidate from another vendor.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,43 @@ def test_cost_prices_reads_writes_and_misses_separately() -> None:
 def test_cache_writes_without_a_matching_ttl_split_leave_cost_unknown(headers: dict[str, str]) -> None:
     obs = _observations(CONFIG, completion()["usage"], headers)
     assert obs["api_cost_usd"].value is None and "TTL" in str(obs["api_cost_usd"].missing_reason)
+
+
+# The non-streaming example from the Chat Completions reference (platform.kimi.ai/docs/api/chat): a cold
+# cache reports only cache_write_tokens; cached_tokens is absent both top-level and in prompt_tokens_details.
+DOCUMENTED_COMPLETION: dict[str, Any] = {
+    "id": "chatcmpl-6adb0d430e590c70159c6ca1", "object": "chat.completion", "created": 1_792_740_680,
+    "model": MODEL,
+    "choices": [{"index": 0, "finish_reason": "stop",
+                 "message": {"role": "assistant", "content": "1 + 1 = 2", "reasoning_content": "..."}}],
+    "usage": {"completion_tokens": 112, "prompt_tokens": 373, "total_tokens": 485,
+              "completion_tokens_details": {"reasoning_tokens": 90},
+              "prompt_tokens_details": {"cache_write_tokens": 256}},
+}
+DOCUMENTED_COST = (117 * 2.0 + 256 * 2.0 + 112 * 10.0) / 1e6  # 373 = 256 written + 117 uncached; no reads
+
+
+def test_documented_cold_cache_response_is_priced() -> None:
+    obs = _observations(CONFIG, copy.deepcopy(DOCUMENTED_COMPLETION["usage"]), WRITE_HEADERS)
+    assert obs["cached_input_tokens"].value == 0 and "omitted" in obs["cached_input_tokens"].source
+    assert obs["uncached_input_tokens"].value == 117
+    assert obs["api_cost_usd"].value == pytest.approx(DOCUMENTED_COST)
+
+
+def test_documented_cold_cache_response_replays_with_cost(tmp_path: Path) -> None:
+    reply = httpx2.Response(200, json=DOCUMENTED_COMPLETION, headers=WRITE_HEADERS)
+    outcome, _ = call(tmp_path, MockKimi(reply=reply))
+    assert outcome.cost_incurred is CostIncurred.YES
+    assert outcome.observations["cached_input_tokens"].value == 0
+    assert outcome.observations["cache_write_5m_tokens"].value == 256
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(DOCUMENTED_COST)
+
+
+def test_usage_without_a_cache_breakdown_leaves_cost_unknown() -> None:
+    usage = copy.deepcopy(DOCUMENTED_COMPLETION["usage"])
+    del usage["prompt_tokens_details"]
+    obs = _observations(CONFIG, usage, WRITE_HEADERS)
+    assert obs["cached_input_tokens"].value is None and obs["api_cost_usd"].value is None
 
 
 def test_no_cache_writes_need_no_ttl_split() -> None:

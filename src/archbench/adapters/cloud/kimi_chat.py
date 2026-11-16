@@ -16,7 +16,9 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
 
 Cost uses configured prices. `usage.prompt_tokens` is the total input; cache reads
 (`prompt_tokens_details.cached_tokens`), cache writes (`prompt_tokens_details.cache_write_tokens`) and
-uncached input sum to it. Cache writes are priced by TTL, which only the `Msh-Usage-Cache-Write-Tokens-5m`
+uncached input sum to it. The documented response omits `cached_tokens` when nothing was read from the cache
+(it reports `prompt_tokens_details` with only `cache_write_tokens`); that is recorded as zero cache reads, while
+a usage object with no `prompt_tokens_details` leaves the breakdown unknown. Cache writes are priced by TTL, which only the `Msh-Usage-Cache-Write-Tokens-5m`
 and `-1h` response headers break down; writes reported without that breakdown leave the cost unknown.
 
 Configuration parameters (all others are rejected at qualification):
@@ -398,6 +400,13 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any], headers: Ma
         else Observation.missing("tokens", source, "not reported in usage")
         for name, v in values.items()
     }
+    if cached is None and isinstance(writes, int):
+        # The documented response reports the cache breakdown as prompt_tokens_details with only
+        # cache_write_tokens: cached_tokens is omitted when nothing was read from the cache.
+        cached = 0
+        obs["cached_input_tokens"] = Observation(
+            value=0, unit="tokens",
+            source=f"{source}: cached_tokens omitted from a reported prompt_tokens_details (no cache reads)")
     for ttl, header in CACHE_WRITE_HEADERS.items():
         raw = headers.get(header)
         obs[f"cache_write_{ttl}_tokens"] = (
