@@ -1,0 +1,60 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Command A+ candidate: Cohere's newest Command model (command-a-plus-05-2026, released 2026-05-20; "the last
+# model in the Command A family"), a dated snapshot on the native Chat API v2. Responses do not echo the model,
+# so qualification checks the id against GET /v1/models/{model}. Reasoning is on by default for models that
+# support it. SERVER-SIDE PROMPT CHANGE: Cohere inserts its CONTEXTUAL safety instruction into every prompt by
+# default, and Command A models do not offer safety_mode OFF; this is disclosed, not avoidable.
+# KEYS: on A+ even production keys are limited to 1,000 chat calls a month (rate limit: contact sales), and trial
+# keys allow 20 calls a minute and no production or commercial use. Qualification makes 3 chat calls and 1 model lookup.
+# native_recommended profile: provider defaults; only max_output_tokens is set. Facts from docs.cohere.com
+# (docs/models, docs/command-a-plus, reference/chat, docs/reasoning, docs/safety-modes, docs/rate-limits,
+# reference/get-model) and cohere.com/pricing, read 2026-11-16.
+configuration_id: command-a-plus-05-2026
+revision: 1
+track: cloud
+adapter: cohere
+provider: cohere
+model: command-a-plus-05-2026
+profile: native_recommended
+context_limit: 128000  # docs/models says "128k"; the model card reported context_length 436000 on 2026-11-16
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates (API default is the model maximum). Thinking counts as output tokens (observed 2026-11-16); whether max_tokens caps it is not documented
+  thinking:
+    state: omitted
+    documented_default: enabled
+    source: native_recommended uses the provider default ("enabled by default for models that support it"); no default token budget
+    verified_on: 2026-11-16
+  safety_mode:
+    state: omitted
+    documented_default: CONTEXTUAL
+    source: provider default; inserts Cohere's contextual-safety instruction. OFF is not available for Command A and newer models
+    verified_on: 2026-11-16
+  temperature:
+    state: omitted
+    documented_default: 0.6
+    source: native_recommended uses the provider default (GET /v1/models/command-a-plus-05-2026 sampling_defaults; the generic chat reference says 0.3)
+    verified_on: 2026-11-16
+  top_p:
+    state: omitted
+    documented_default: 0.95
+    source: native_recommended uses the provider default (Cohere's `p`; model card sampling_defaults; the generic chat reference says 0.75)
+    verified_on: 2026-11-16
+  top_k:
+    state: omitted
+    documented_default: 0
+    source: native_recommended uses the provider default (Cohere's `k`, from the chat reference; 0 disables it; not in the model card)
+    verified_on: 2026-11-16
+adapter_options:
+  timeout_s: 900  # Cohere documents a server-side TIMEOUT finish reason but not its limit
+  max_output_tokens_limit: 64000  # docs/models lists "64k" maximum output; larger max_tokens is capped silently
+  pricing:
+    # Per 1M billed tokens (usage.billed_units). UNCONFIRMED: cohere.com/pricing shows $2.50 / $10.00 on the
+    # Command A+ model card but "$0" in its pricing table; check the billing dashboard after the first calls.
+    # Thinking is billed as output (observed 2026-11-16: billed output included reasoning tokens).
+    input_usd_per_mtok: 2.50
+    output_usd_per_mtok: 10.00
+    source: cohere.com/pricing (Command A+ model card; conflicts with the $0 table entry), read 2026-11-16
+    verified_on: "2026-11-16"
