@@ -1,0 +1,46 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# MiniMax-M3.1-Flash candidate: MiniMax's latest M-series model (released 2026-10-19; ~428B total / 23B active,
+# open weights), on the Anthropic-compatible Messages API of the international (global) platform. ALIAS
+# LIMITATION: MiniMax offers no dated snapshots and documents silent rerouting of retired ids (the Preview id and
+# M2.x on plan keys now serve M3.1-Flash), so every response's `model` must equal `MiniMax-M3.1-Flash`.
+# M3.1-Flash always thinks (thinking "disabled" and effort "none" return HTTP 400); thinking is adaptive, counts
+# toward max_tokens, and is billed as output. Temperature (1) and top_p (0.95) are fixed by MiniMax and ignored
+# if sent, so they are not configured. Use a pay-as-you-go key, not an M Plan / Token Plan key.
+# native_recommended profile: provider defaults; only max_output_tokens is set. Facts from platform.minimax.io
+# (docs/guides/text-generation, api-reference/text-anthropic-api and its OpenAPI spec, faq/models,
+# release-notes/models, pricing/overview, guides/rate-limits, api-reference/text-prompt-caching), read 2026-11-16.
+configuration_id: minimax-m3.1-flash
+revision: 1
+track: cloud
+adapter: minimax
+provider: minimax
+model: MiniMax-M3.1-Flash
+profile: native_recommended
+context_limit: 1000000
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; includes thinking (MiniMax recommends 131072, maximum 524288)
+  effort:
+    state: omitted
+    documented_default: max
+    source: native_recommended uses the provider default (output_config.effort accepts low, medium, high, xhigh, max)
+    verified_on: 2026-11-16
+  thinking:
+    state: omitted
+    documented_default: adaptive
+    source: M3.1-Flash always thinks; "adaptive" is the only accepted value
+    verified_on: 2026-11-16
+adapter_options:
+  timeout_s: 900  # MiniMax documents no non-streaming limit
+  pricing:
+    # Per 1M tokens, global platform. input_tokens is new input only; cache reads are reported separately.
+    # Caching is automatic for prompts of 512+ tokens; MiniMax lists no cache-write price, so a reported
+    # cache write leaves the cost unknown.
+    region: global
+    input_usd_per_mtok: 0.15
+    cache_read_usd_per_mtok: 0.015
+    output_usd_per_mtok: 0.60        # includes thinking
+    source: platform.minimax.io/docs/pricing/overview (MiniMax-M3.1-Flash), read 2026-11-16
+    verified_on: "2026-11-16"
