@@ -88,24 +88,29 @@ class GeminiAdapter:
         explicit_names = {n for n, s in config.parameters.items() if s.state is ParameterState.EXPLICIT}
         unsupported = sorted(explicit_names - SUPPORTED_PARAMETERS)
         model_check, limits = self._model_check(config)
+        parameter_check = QualificationCheck(
+            name="parameter_support",
+            passed=not unsupported and "max_output_tokens" in explicit_names,
+            detail=f"unsupported: {unsupported}" if unsupported else
+            ("max_output_tokens must be explicit" if "max_output_tokens" not in explicit_names else "ok"),
+        )
         checks = [
             QualificationCheck(
                 name="adapter_identity",
                 passed=config.adapter == self.name and config.track is Track.CLOUD and config.provider == "google",
                 detail=f"adapter={config.adapter} track={config.track} provider={config.provider}",
             ),
-            QualificationCheck(
-                name="parameter_support",
-                passed=not unsupported and "max_output_tokens" in explicit_names,
-                detail=f"unsupported: {unsupported}" if unsupported else
-                ("max_output_tokens must be explicit" if "max_output_tokens" not in explicit_names else "ok"),
-            ),
+            parameter_check,
             model_check,
             context_check(config, requirements, limits.get("inputTokenLimit")),
         ]
         probes: list[dict[str, Any]] = []
         if requirements.requires_continuation:
-            if model_check.passed is not True:
+            # Probes are built from the configured parameters: send none for an invalid configuration.
+            if parameter_check.passed is not True:
+                checks.append(QualificationCheck(name="continuation", passed=None,
+                                                 detail="not evaluated: configuration parameters are invalid"))
+            elif model_check.passed is not True:
                 checks.append(QualificationCheck(name="continuation", passed=None,
                                                  detail="not evaluated: model identity was not verified"))
             else:
