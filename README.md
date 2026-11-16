@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai) chat-completions adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -39,12 +39,7 @@ request has unknown cost, with the peak-rate figure recorded beside it. The Kimi
 Chat Completions API on api.moonshot.ai and replays each assistant message with its `reasoning_content`, as
 K3 models require. It never sends temperature or top_p, which K3 fixes and rejects if changed. It prices
 cache reads, cache writes (by TTL, from the `Msh-Usage-Cache-Write-Tokens-*` headers), and misses
-separately; a cache write reported without that TTL split has unknown cost. The GLM adapter uses Z.ai's
-pay-as-you-go Chat Completions API (api.z.ai/api/paas/v4) and rejects the Coding Plan endpoints, which bill
-against plan quota. Z.ai has no dated model ids and no model-list endpoint, so qualification proves the
-served id with a live probe, and each response's `model` must match. It maps Z.ai's business error codes
-(1301 refusal, 1261 context, 1302/1305 rate limit) and the `sensitive`, `model_context_window_exceeded`,
-and `network_error` finish reasons, and prices cache hits and misses separately.
+separately; a cache write reported without that TTL split has unknown cost.
 
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
@@ -104,7 +99,7 @@ ignored. Keys are passed straight to adapters (never exported to the environment
 captured traffic, and any artifact, record, or frozen config containing a loaded key or a key-shaped
 string is rejected rather than written. Use `--secrets PATH` for a file elsewhere. Without the file,
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
-`GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi; `ZAI_API_KEY` for GLM).
+`GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi).
 
 ## Live debugging run
 
@@ -151,8 +146,7 @@ qualification but has no experiment yet. `qwen-mlx-p6-pick-model.yaml` runs P6 o
 a Mistral key. `grok-p6-pick-model.yaml` runs P6 on Grok 4.3 and needs an xAI key.
 `deepseek-p6-pick-model.yaml` runs P6 on DeepSeek Flash and needs a DeepSeek key.
 `kimi-p6-pick-model.yaml` runs P6 on Kimi K3.1 Pro and needs a Moonshot key.
-`glm-p6-pick-model.yaml` runs P6 on GLM-5.3 and needs a Z.ai key. `fake-p4-three-frameworks.yaml` and
-`fake-p6-pick-model.yaml` with `agentic-design-bias-fake.yaml` run the same path offline. The catalog
+`fake-p4-three-frameworks.yaml` and `fake-p6-pick-model.yaml` with `agentic-design-bias-fake.yaml` run the same path offline. The catalog
 is a draft: verify vendors and statuses against first-party sources before reporting results.
 
 ## Workflow
