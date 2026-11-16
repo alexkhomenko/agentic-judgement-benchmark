@@ -1,0 +1,74 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Qwen4-Max candidate: Alibaba's current Qwen Max flagship (released 2026-11-16), on Model Studio's
+# pay-as-you-go OpenAI-compatible endpoint in the Singapore region. ALIAS LIMITATION: `qwen4-max` is the only
+# documented id and Model Studio offers no dated snapshot yet, so the model behind it may change without notice;
+# every streamed chunk's `model` must equal `qwen4-max`, and qualification records the served id. Hybrid
+# thinking model, thinking on by default (effort high, budget 131072); `preserve_thinking` defaults to true, so
+# earlier reasoning_content is replayed and billed as input. Web search (`enable_search`) is off by default and
+# never sent. native_recommended profile: provider defaults; only max_output_tokens is set. Facts from
+# alibabacloud.com/help/en/model-studio (qwen4-max, qwen-api-via-openai-chat-completions, deep-thinking,
+# model-pricing, explicit-cache-qwen4, context-cache, regions), read 2026-11-16.
+# To use a workspace endpoint instead of the shared host, set adapter_options.base_url to
+# https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1 (the URL is recorded in wire captures).
+configuration_id: qwen4-max
+revision: 1
+track: cloud
+adapter: qwen
+provider: alibaba
+model: qwen4-max
+profile: native_recommended
+context_limit: 1000000  # max input 983616 tokens in thinking mode
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; max_tokens covers thinking plus answer (thinking-mode default 262144)
+  enable_thinking:
+    state: omitted
+    documented_default: true
+    source: native_recommended uses the provider default
+    verified_on: 2026-11-16
+  reasoning_effort:
+    state: omitted
+    documented_default: high
+    source: native_recommended uses the provider default (qwen4-max accepts none, low, high, xhigh)
+    verified_on: 2026-11-16
+  preserve_thinking:
+    state: omitted
+    documented_default: true
+    source: provider default for qwen4-max; prior-turn reasoning_content must be sent back, which exact replay does
+    verified_on: 2026-11-16
+  temperature:
+    state: omitted
+    documented_default: 1.0
+    source: native_recommended uses the provider default (thinking mode)
+    verified_on: 2026-11-16
+  top_p:
+    state: omitted
+    documented_default: 0.95
+    source: native_recommended uses the provider default (thinking mode)
+    verified_on: 2026-11-16
+  top_k:
+    state: omitted
+    documented_default: 20
+    source: native_recommended uses the provider default
+    verified_on: 2026-11-16
+  presence_penalty:
+    state: omitted
+    documented_default: 0.0
+    source: native_recommended uses the provider default (thinking mode)
+    verified_on: 2026-11-16
+adapter_options:
+  timeout_s: 300  # per connect and per read between stream chunks; the stream itself may run longer
+  pricing:
+    # Per 1M tokens, Singapore. Cache reads, cache writes, and uncached input are disjoint parts of prompt_tokens.
+    # Implicit caching cannot be disabled; the adapter sends no explicit cache markers. Recorded cost is list
+    # price: the 1M-token new-user free quota (90 days) is not modelled.
+    region: ap-southeast-1
+    input_usd_per_mtok: 1.50            # cache miss; a single tier up to 1M input tokens
+    cached_input_usd_per_mtok: 0.075    # explicit and implicit cache reads
+    cache_write_5m_usd_per_mtok: 1.875
+    cache_write_1h_usd_per_mtok: 3.00
+    output_usd_per_mtok: 4.50           # thinking and non-thinking output priced the same
+    source: alibabacloud.com/help/en/model-studio/model-pricing (qwen4-max, Singapore), read 2026-11-16
+    verified_on: "2026-11-16"
