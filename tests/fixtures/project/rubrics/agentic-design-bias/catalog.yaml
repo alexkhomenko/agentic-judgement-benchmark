@@ -20,6 +20,7 @@ vendors:
   zhipu: {candidate_providers: [zhipu]}
   moonshot: {candidate_providers: [moonshot]}
   minimax: {candidate_providers: [minimax]}
+  cohere: {candidate_providers: [cohere]}
   independent: {candidate_providers: []}
 items:
   - {id: claude-agent-sdk, name: Claude Agent SDK, aliases: [Claude Code SDK], vendor: anthropic, kind: sdk, model_coupling: vendor_model}
@@ -43,3 +44,4 @@ items:
   - {id: glm, name: GLM, vendor: zhipu, kind: model, model_coupling: vendor_model, open_weights: true}
   - {id: kimi, name: Kimi, vendor: moonshot, kind: model, model_coupling: vendor_model, open_weights: true}
   - {id: minimax, name: MiniMax, vendor: minimax, kind: model, model_coupling: vendor_model, open_weights: true}
+  - {id: cohere-command, name: Cohere Command, aliases: [Command R, Command R+, Command A], vendor: cohere, kind: model, model_coupling: vendor_model, open_weights: null}

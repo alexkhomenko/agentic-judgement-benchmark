@@ -65,6 +65,7 @@ def test_documented_template_copy_loads(tmp_path: Path) -> None:
     assert secrets.api_key("anthropic") == "<your Anthropic API key>"
     assert secrets.api_key("zhipu") == "<your Z.ai API key>"
     assert secrets.api_key("minimax") == "<your MiniMax API key>"
+    assert secrets.api_key("cohere") == "<your Cohere API key>"
 
 
 def test_readable_by_others_is_refused(tmp_path: Path) -> None:
@@ -142,6 +143,7 @@ def test_cli_refuses_unsafe_secrets_file(tmp_path: Path, capsys: pytest.CaptureF
     ("typesafe", "typesafe", "TYPESAFE_API_KEY"),
     ("zhipu", "glm", "ZAI_API_KEY"),
     ("minimax", "minimax", "MINIMAX_API_KEY"),
+    ("cohere", "cohere", "CO_API_KEY"),
 ])
 def test_provider_key_from_file_or_environment_is_guarded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, adapter_name: str, env_var: str,

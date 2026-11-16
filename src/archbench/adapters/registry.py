@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from ..secrets import GUARD, LocalSecrets
 from .base import InferenceAdapter
 from .cloud.anthropic_messages import AnthropicAdapter
+from .cloud.cohere_chat import CohereAdapter
 from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
 from .cloud.glm_chat import GlmAdapter
@@ -68,6 +69,9 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     minimax_key = secrets.api_key("minimax") or os.environ.get("MINIMAX_API_KEY") or None
     if minimax_key:
         GUARD.register(minimax_key)
+    cohere_key = secrets.api_key("cohere") or os.environ.get("CO_API_KEY") or None
+    if cohere_key:
+        GUARD.register(cohere_key)
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
@@ -83,6 +87,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "glm": GlmAdapter(api_key=zhipu_key),
         "kimi": KimiAdapter(api_key=moonshot_key),
         "minimax": MiniMaxAdapter(api_key=minimax_key),
+        "cohere": CohereAdapter(api_key=cohere_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),
