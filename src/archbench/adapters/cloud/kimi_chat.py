@@ -378,6 +378,8 @@ def _http_failure(status: int, error_type: str | None) -> tuple[FailureKind, Cos
         if error_type == "exceeded_current_quota_error":  # insufficient balance or disabled account
             return FailureKind.PROVIDER_ERROR, CostIncurred.NO
         return FailureKind.RATE_LIMITED, CostIncurred.NO  # rate_limit_reached_error, engine_overloaded_error
+    if status == 499:  # connection closed before the response was returned; inference may already have run
+        return FailureKind.TRANSIENT_TRANSPORT, CostIncurred.UNKNOWN
     if status == 504:  # gateway gave up after 900 s; inference may have run
         return FailureKind.AMBIGUOUS_TIMEOUT, CostIncurred.UNKNOWN
     if status >= 500:  # 500 server_error, 503 server_unavailable: retry after a brief wait

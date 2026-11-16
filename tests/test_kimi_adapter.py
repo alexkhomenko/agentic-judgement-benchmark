@@ -206,6 +206,8 @@ def error(status: int, kind: str, message: str = "nope") -> httpx2.Response:
     (error(429, "exceeded_current_quota_error"), FailureKind.PROVIDER_ERROR, CostIncurred.NO),
     (error(429, "rate_limit_reached_error"), FailureKind.RATE_LIMITED, CostIncurred.NO),
     (error(429, "engine_overloaded_error"), FailureKind.RATE_LIMITED, CostIncurred.NO),
+    (error(499, "client_closed_request"), FailureKind.TRANSIENT_TRANSPORT, CostIncurred.UNKNOWN),
+    (httpx2.Response(499, text="client closed request"), FailureKind.TRANSIENT_TRANSPORT, CostIncurred.UNKNOWN),
     (error(503, "server_unavailable"), FailureKind.TRANSIENT_TRANSPORT, CostIncurred.NO),
     (httpx2.Response(504, text="gateway timeout"), FailureKind.AMBIGUOUS_TIMEOUT, CostIncurred.UNKNOWN),
     (httpx2.ReadTimeout("read timed out"), FailureKind.AMBIGUOUS_TIMEOUT, CostIncurred.UNKNOWN),
