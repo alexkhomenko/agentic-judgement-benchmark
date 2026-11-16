@@ -14,6 +14,7 @@ from .cloud.glm_chat import GlmAdapter
 from .cloud.kimi_chat import KimiAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
+from .cloud.qwen_chat import QwenAdapter
 from .cloud.typesafe_jev import TypeSafeAdapter
 from .cloud.xai_responses import XAIAdapter
 from .fake import FakeAdapter
@@ -63,6 +64,9 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     zhipu_key = secrets.api_key("zhipu") or os.environ.get("ZAI_API_KEY") or None
     if zhipu_key:
         GUARD.register(zhipu_key)
+    alibaba_key = secrets.api_key("alibaba") or os.environ.get("DASHSCOPE_API_KEY") or None
+    if alibaba_key:
+        GUARD.register(alibaba_key)
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
@@ -77,6 +81,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
         "glm": GlmAdapter(api_key=zhipu_key),
         "kimi": KimiAdapter(api_key=moonshot_key),
+        "qwen": QwenAdapter(api_key=alibaba_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),
