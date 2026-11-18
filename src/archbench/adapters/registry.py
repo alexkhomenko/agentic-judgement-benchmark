@@ -13,6 +13,7 @@ from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
 from .cloud.glm_chat import GlmAdapter
 from .cloud.kimi_chat import KimiAdapter
+from .cloud.meta_responses import MetaAdapter
 from .cloud.minimax_messages import MiniMaxAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
@@ -75,6 +76,10 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
+    # Meta Model API key; MODEL_API_KEY is the variable Meta's samples use (no SDK reads it automatically).
+    meta_key = secrets.api_key("meta") or os.environ.get("MODEL_API_KEY") or None
+    if meta_key:
+        GUARD.register(meta_key)
     return AdapterRegistry({
         "fake": FakeAdapter(),
         "fake-judge": FakeJudgeAdapter(),
@@ -83,6 +88,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "gemini": GeminiAdapter(api_key=google_key),
         "mistral": MistralAdapter(api_key=mistral_key),
         "xai": XAIAdapter(api_key=xai_key),
+        "meta": MetaAdapter(api_key=meta_key),
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
         "glm": GlmAdapter(api_key=zhipu_key),
         "kimi": KimiAdapter(api_key=moonshot_key),
