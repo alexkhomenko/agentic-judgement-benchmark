@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from ..secrets import GUARD, LocalSecrets
 from .base import InferenceAdapter
 from .cloud.anthropic_messages import AnthropicAdapter
+from .cloud.bedrock_converse import BedrockAdapter
 from .cloud.cohere_chat import CohereAdapter
 from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
@@ -77,6 +78,10 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     moonshot_key = secrets.api_key("moonshot") or os.environ.get("MOONSHOT_API_KEY") or None
     if moonshot_key:
         GUARD.register(moonshot_key)
+    # Bedrock API key (a bearer token); AWS SDKs read the same environment variable. SigV4 credentials are not used.
+    bedrock_key = secrets.api_key("bedrock") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or None
+    if bedrock_key:
+        GUARD.register(bedrock_key)
     # Meta Model API key; MODEL_API_KEY is the variable Meta's samples use (no SDK reads it automatically).
     meta_key = secrets.api_key("meta") or os.environ.get("MODEL_API_KEY") or None
     if meta_key:
@@ -101,6 +106,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "kimi": KimiAdapter(api_key=moonshot_key),
         "minimax": MiniMaxAdapter(api_key=minimax_key),
         "cohere": CohereAdapter(api_key=cohere_key),
+        "bedrock": BedrockAdapter(api_key=bedrock_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),

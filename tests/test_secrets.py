@@ -66,6 +66,7 @@ def test_documented_template_copy_loads(tmp_path: Path) -> None:
     assert secrets.api_key("zhipu") == "<your Z.ai API key>"
     assert secrets.api_key("minimax") == "<your MiniMax API key>"
     assert secrets.api_key("cohere") == "<your Cohere API key>"
+    assert secrets.api_key("bedrock") == "<your Amazon Bedrock API key>"
     assert secrets.api_key("meta") == "<your Meta Model API key>"
     assert secrets.api_key("microsoft") == "<your Microsoft Foundry key>"
 
@@ -146,6 +147,7 @@ def test_cli_refuses_unsafe_secrets_file(tmp_path: Path, capsys: pytest.CaptureF
     ("zhipu", "glm", "ZAI_API_KEY"),
     ("minimax", "minimax", "MINIMAX_API_KEY"),
     ("cohere", "cohere", "CO_API_KEY"),
+    ("bedrock", "bedrock", "AWS_BEARER_TOKEN_BEDROCK"),
     ("meta", "meta", "MODEL_API_KEY"),
     ("microsoft", "mai", "AZURE_INFERENCE_CREDENTIAL"),
 ])

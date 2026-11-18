@@ -33,6 +33,7 @@ _TEXT_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}"),
     re.compile(r"\bxai-[A-Za-z0-9]{20,}"),
+    re.compile(r"\b(ABSKQmVkcm9ja0FQSUtleS|bedrock-api-key-)[A-Za-z0-9+/=_-]{8,}"),  # Amazon Bedrock API keys
     re.compile(r"\bLLM_\d{6,}_[A-Za-z0-9_-]{16,}"),  # Meta Model API keys
     re.compile(r"(?i)\b(api[_-]?key|x-api-key|authorization)(\s*[=:]\s*)\S+"),
 )
@@ -52,8 +53,6 @@ def redact(value: Any) -> Any:
 def redact_text(text: str) -> str:
     text = GUARD.scrub(text)
     text = _TEXT_PATTERNS[0].sub(f"Bearer {REDACTED}", text)
-    text = _TEXT_PATTERNS[1].sub(REDACTED, text)
-    text = _TEXT_PATTERNS[2].sub(REDACTED, text)
-    text = _TEXT_PATTERNS[3].sub(REDACTED, text)
-    text = _TEXT_PATTERNS[4].sub(REDACTED, text)
-    return _TEXT_PATTERNS[5].sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+    for pattern in _TEXT_PATTERNS[1:-1]:  # vendor key formats
+        text = pattern.sub(REDACTED, text)
+    return _TEXT_PATTERNS[-1].sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)

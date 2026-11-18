@@ -1,0 +1,55 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# Nova 2 Lite candidate: Amazon's current-generation Nova text model and the only Nova 2 text model that is
+# generally available (Nova 2 Pro and Omni are preview, Nova Forge early access only). Launched 2025-12-02;
+# lifecycle ACTIVE, end of life no sooner than 2026-12-02. Called through Bedrock's Converse API with a Bedrock
+# API key. In-Region invocation is not supported, so `model` is the US geographic inference profile: requests
+# from us-east-1 may be served in us-east-1, us-east-2 or us-west-2 (qualification records the profile's
+# destinations; responses do not say which Region served them). Responses do not name the model, so
+# qualification checks the profile and the foundation model on the control plane.
+# CONTENT MODERATION: Nova's built-in content filters always apply and cannot be configured; blocks are refusals.
+# Reasoning is off by default and its text is returned as "[REDACTED]".
+# native_recommended profile: provider defaults; only max_output_tokens is set. Facts from docs.aws.amazon.com
+# (bedrock userguide: model-card-amazon-nova-2-lite, api-keys*, cross-region-inference; APIReference
+# API_runtime_Converse; nova2-userguide: extended-thinking, request-response-schema, using-converse-api) and the
+# AWS Price List API (AmazonBedrock, us-east-1, publicationDate 2026-11-11), read 2026-11-16.
+configuration_id: nova-2-lite-us
+revision: 1
+track: cloud
+adapter: bedrock
+provider: bedrock
+model: us.amazon.nova-2-lite-v1:0
+profile: native_recommended
+context_limit: 1000000  # model card: 1M tokens
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates. AWS documents the maxTokens ceiling inconsistently (64K on the model card, 65,000 on using-converse-api, 5,000 on request-response-schema); qualification probes with 2048, so check the first full-length call
+  temperature:
+    state: omitted
+    documented_default: 0.7
+    source: native_recommended uses the provider default (nova2-userguide request-response-schema)
+    verified_on: 2026-11-16
+  top_p:
+    state: omitted
+    documented_default: 0.9
+    source: native_recommended uses the provider default (nova2-userguide request-response-schema)
+    verified_on: 2026-11-16
+  reasoning:
+    state: omitted
+    documented_default: disabled
+    source: native_recommended uses the provider default (nova2-userguide extended-thinking)
+    verified_on: 2026-11-16
+adapter_options:
+  region: us-east-1  # source Region; Bedrock API keys are Region-scoped (short-term keys) and pricing follows the source Region
+  timeout_s: 3600  # AWS: Nova inference can take up to 60 minutes; set the read timeout to at least 3600 s
+  max_output_tokens_limit: 64000  # model card: 64K maximum output (see max_output_tokens.source for conflicting pages)
+  pricing:
+    # Per 1M tokens, Standard tier, geographic (us.) profile from source Region us-east-1. Global profiles
+    # are about 10% cheaper ($0.30 / $2.50 / $0.075). Reasoning tokens are billed as output.
+    input_usd_per_mtok: 0.33
+    output_usd_per_mtok: 2.75
+    cache_read_usd_per_mtok: 0.0825
+    cache_write_usd_per_mtok: 0.0
+    source: AWS Price List API (AmazonBedrock offer, us-east-1, publicationDate 2026-11-11); aws.amazon.com/bedrock/pricing renders prices client-side
+    verified_on: "2026-11-16"
