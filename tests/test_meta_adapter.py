@@ -124,6 +124,34 @@ def test_long_prompts_are_priced_without_a_long_context_guard(tmp_path: Path) ->
     assert outcome.observations["api_cost_usd"].value == pytest.approx((500_000 * 1.25 + 1000 * 4.25) / 1e6)
 
 
+EMBER_RATES = {"input_usd_per_mtok": 0.10, "cached_input_usd_per_mtok": 0.004, "output_usd_per_mtok": 0.50}
+EMBER_LONG = {"threshold_input_tokens": 200_000, "input_usd_per_mtok": 0.30, "cached_input_usd_per_mtok": 0.012,
+              "output_usd_per_mtok": 1.50}
+
+
+@pytest.mark.parametrize(("long_context", "expected"), [
+    (None, None),  # never report base rates for a request Meta prices at long-context rates
+    (EMBER_LONG, (300_000 * 0.30 + 1000 * 1.50) / 1e6),
+])
+def test_ember_long_context_pricing_is_never_silently_skipped(tmp_path: Path, long_context: dict[str, Any] | None,
+                                                               expected: float | None) -> None:
+    pricing = {**EMBER_RATES, "source": "test", **({"long_context": long_context} if long_context else {})}
+    ember = CONFIG.model_copy(update={"model": "muse-ember-1.0",
+                                      "adapter_options": {**CONFIG.adapter_options, "pricing": pricing}})
+    usage = {"input_tokens": 300_000, "input_tokens_details": {"cached_tokens": 0},
+             "output_tokens": 1000, "output_tokens_details": {"reasoning_tokens": 600}, "total_tokens": 301_000}
+    body = response(model="muse-ember-1.0", usage=usage)
+    outcome, _ = call(tmp_path, MockMeta(reply=httpx2.Response(200, json=body)), ember)
+    cost = outcome.observations["api_cost_usd"]
+    assert cost.value == (pytest.approx(expected) if expected is not None else None)
+    if expected is None:
+        assert "long-context" in str(cost.missing_reason)
+    small = {**usage, "input_tokens": 150_000, "total_tokens": 151_000}
+    outcome, _ = call(tmp_path, MockMeta(reply=httpx2.Response(200, json=response(model="muse-ember-1.0", usage=small))),
+                      ember)
+    assert outcome.observations["api_cost_usd"].value == pytest.approx((150_000 * 0.10 + 1000 * 0.50) / 1e6)
+
+
 def test_missing_meta_key_fails_without_falling_back_to_openai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
     mock = MockMeta()
