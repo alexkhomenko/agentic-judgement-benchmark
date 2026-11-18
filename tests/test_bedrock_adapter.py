@@ -173,6 +173,36 @@ def test_high_reasoning_effort_sends_no_inference_config(tmp_path: Path) -> None
     assert body["additionalModelRequestFields"] == {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "high"}}
 
 
+def _high_effort(**options: Any) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["max_output_tokens"] = {"state": "omitted", "source": "AWS requires it unset at high effort"}
+    data["parameters"]["reasoning"] = {"state": "explicit", "value": "enabled"}
+    data["parameters"]["reasoning_effort"] = {"state": "explicit", "value": "high"}
+    data["adapter_options"] = {**data["adapter_options"], **options}
+    return ModelConfiguration.model_validate(data)
+
+
+def test_high_reasoning_effort_qualifies_reserving_the_model_maximum_output() -> None:
+    mock = MockBedrock()
+    report = mock.adapter().qualify(_high_effort(), REQUIREMENTS.model_copy(update={"output_budget_tokens": None}))
+    checks = {c.name: c for c in report.checks}
+    assert report.passed and len(mock.chats) == 3, checks
+    assert "reserves max_output_tokens_limit (64000)" in checks["context_envelope"].detail
+    assert all("inferenceConfig" not in json.loads(r.content) for r in mock.chats)
+
+
+def test_high_reasoning_effort_fails_the_envelope_when_the_reserved_output_does_not_fit() -> None:
+    report = MockBedrock().adapter().qualify(_high_effort(max_output_tokens_limit=600_000),
+                                             REQUIREMENTS.model_copy(update={"output_budget_tokens": None}))
+    assert {c.name: c for c in report.checks}["context_envelope"].passed is False
+
+
+def test_high_reasoning_effort_still_requires_the_output_limit() -> None:
+    report = MockBedrock().adapter().qualify(_high_effort(max_output_tokens_limit=None),
+                                             REQUIREMENTS.model_copy(update={"output_budget_tokens": None}))
+    assert "max_output_tokens_limit" in {c.name: c for c in report.checks}["parameter_support"].detail
+
+
 def test_text_blocks_are_joined_redacted_reasoning_is_dropped_and_truncation_is_extracted(tmp_path: Path) -> None:
     reply = converse("part one, ", reasoning=True, stop="max_tokens", blocks=[{"text": "part two"}])
     outcome, files = call(tmp_path, MockBedrock(reply=httpx2.Response(200, json=reply)))
@@ -309,6 +339,15 @@ def test_an_in_region_model_id_needs_on_demand_support() -> None:
     report = mock.adapter().qualify(CONFIG.model_copy(update={"model": BASE}), REQUIREMENTS)
     checks = {c.name: c for c in report.checks}
     assert "does not support ON_DEMAND" in checks["model_identity"].detail and mock.chats == []
+
+
+@pytest.mark.parametrize("types", [["ON_DEMAND"], ["ON_DEMAND", "PROVISIONED"], []])
+def test_a_profile_id_does_not_depend_on_the_undocumented_inference_type(types: list[str]) -> None:
+    mock = MockBedrock(model=_model(inferenceTypesSupported=types))
+    report = mock.adapter().qualify(CONFIG, REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed and checks["model_identity"].passed is True and len(mock.chats) == 3
+    assert f"inference_types={types}" in checks["model_identity"].detail
 
 
 def _model(**details: Any) -> dict[str, Any]:

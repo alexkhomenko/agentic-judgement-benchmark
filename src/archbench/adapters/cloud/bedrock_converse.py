@@ -15,7 +15,9 @@ up to five times by default). Every retry is a new harness attempt.
   destination Regions; responses do not say which Region served a request (only CloudTrail does).
 - MODEL IDENTITY: Converse responses do not name the model. Qualification checks the id against the control
   plane (`GET /inference-profiles/{id}`, then `GET /foundation-models/{id}`): Amazon provider, ACTIVE lifecycle,
-  text output, and an invocation type that matches the id. Individual responses cannot be checked.
+  text output, and ON_DEMAND support for a bare model id. A profile id is proven by the profile lookup and the live
+  probe; its `inferenceTypesSupported` (live: "INFERENCE_PROFILE", absent from AWS's documented enum) is only
+  recorded. Individual responses cannot be checked.
 - Only explicitly configured parameters are sent. Nova defaults: temperature 0.7, topP 0.9, maxTokens "dynamic",
   reasoning disabled.
 - CONTENT MODERATION: Nova's built-in filters cannot be configured. A blocked prompt is HTTP 400
@@ -136,7 +138,7 @@ class BedrockAdapter:
                                              detail=f"not evaluated: {', '.join(static_failures)} failed")
         else:
             model_check = self._model_check(config, probes)
-        checks = [*static, model_check, context_check(config, requirements, None)]
+        checks = [*static, model_check, self._context_check(config, requirements)]
         live_name = "continuation" if requirements.requires_continuation else "chat_probe"
         if model_check.passed is True:
             checks.append(self._live_check(config, probes, branches=requirements.requires_continuation))
@@ -144,6 +146,17 @@ class BedrockAdapter:
             checks.append(QualificationCheck(name=live_name, passed=None,
                                              detail="not evaluated: model identity was not verified"))
         return QualificationReport.from_checks(config, self.name, requirements, checks, probes)
+
+    @staticmethod
+    def _context_check(config: ModelConfiguration, requirements: QualificationRequirements) -> QualificationCheck:
+        """With max_output_tokens omitted (required at high reasoning effort), maxTokens is unset and the model may
+        generate up to its documented maximum, so that maximum is reserved for each answer."""
+        limit = _output_limit(config)
+        if requirements.output_budget_tokens is not None or limit is None:
+            return context_check(config, requirements, None)
+        check = context_check(config, requirements.model_copy(update={"output_budget_tokens": limit}), None)
+        return check.model_copy(update={"detail": f"{check.detail}; max_output_tokens omitted, so each answer "
+                                                  f"reserves max_output_tokens_limit ({limit})"})
 
     def _model_check(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
         """Resolve an inference profile to its foundation model, then verify that model on the control plane."""
@@ -188,9 +201,11 @@ class BedrockAdapter:
             problems.append(f"model lifecycle is {lifecycle!r}")
         if "TEXT" not in (model.get("outputModalities") or []):
             problems.append("model does not output text")
-        needed = "INFERENCE_PROFILE" if base != config.model else "ON_DEMAND"
-        if needed not in invocation:
-            problems.append(f"model does not support {needed} invocation (supports {invocation})")
+        # A bare model id needs ON_DEMAND (documented). For a profile id, the profile lookup above and the live probe
+        # are the evidence: the service reports "INFERENCE_PROFILE" here, but AWS does not document that value, so it
+        # is recorded, not required.
+        if base == config.model and "ON_DEMAND" not in invocation:
+            problems.append(f"model does not support ON_DEMAND invocation (supports {invocation})")
         details.insert(0, f"{model.get('modelName')} ({base}): provider={model.get('providerName')}, "
                           f"lifecycle={model.get('modelLifecycle')}, inference_types={invocation}")
         return QualificationCheck(name="model_identity", passed=not problems,
@@ -477,17 +492,22 @@ def _parameter_problem(config: ModelConfiguration) -> str | None:
             return "reasoning_effort must be 'low', 'medium' or 'high'"
     if reasoning == "enabled" and effort is None:
         return "reasoning: enabled requires reasoning_effort (Bedrock rejects reasoningConfig without it)"
+    limit = _output_limit(config)
+    if limit is None:
+        return "adapter_options.max_output_tokens_limit must state the model's maximum output"
     if effort == "high":
         if clash := sorted(names & {"max_output_tokens", "temperature", "top_p", "top_k"}):
             return f"reasoning_effort high requires these to be omitted: {clash}"
         return None
-    limit = config.adapter_options.get("max_output_tokens_limit")
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-        return "adapter_options.max_output_tokens_limit must state the model's maximum output"
     budget = explicit(config, "max_output_tokens")
     if isinstance(budget, bool) or not isinstance(budget, int) or not 1 <= budget <= limit:
         return f"max_output_tokens must be an explicit integer in 1..{limit}"
     return None
+
+
+def _output_limit(config: ModelConfiguration) -> int | None:
+    limit = config.adapter_options.get("max_output_tokens_limit")
+    return None if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 else limit
 
 
 def _error_body(response: httpx2.Response) -> dict[str, Any]:
