@@ -3,7 +3,8 @@ Responses API (`openai_responses`), Gemini generateContent (`gemini_generate`), 
 (`mistral_chat`), xAI Responses API (`xai_responses`, reusing the OpenAI adapter), DeepSeek chat completions
 (`deepseek_chat`), GLM chat completions on Z.ai (`glm_chat`), Kimi (Moonshot AI) chat completions
 (`kimi_chat`), MiniMax Anthropic-compatible Messages (`minimax_messages`), Cohere Chat API v2 (`cohere_chat`),
-Meta Model API Responses for Muse models (`meta_responses`, reusing the OpenAI adapter), TypeSafe Jev System One (`typesafe_jev`).
+Meta Model API Responses for Muse models (`meta_responses`, reusing the OpenAI adapter), Microsoft AI MAI chat
+completions on your own Foundry deployment (`mai_chat`), TypeSafe Jev System One (`typesafe_jev`).
 
 Each adapter must capture the serialized request at the transport boundary after SDK serialization,
 redact authentication fields before persistence, disable hidden SDK retries (or instrument every wire

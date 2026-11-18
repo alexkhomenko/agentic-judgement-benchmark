@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. Microsoft MAI chat-completions adapter (your own Foundry deployment) qualified live with MAI-Thinking-1. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -68,6 +68,17 @@ developer message to every request (not billed or counted, no opt-out), which co
 are not dated snapshots. Reasoning is always on. A safety block (`content_policy_violation`) is a refusal, a 400
 about the context length is context exceeded, and a 504 is an ambiguous timeout. Muse Ember charges a whole
 request at long-context rates above 200K input tokens, so an Ember configuration needs `pricing.long_context`.
+
+The Microsoft MAI adapter (`adapter: mai`, `provider: microsoft`) calls a model deployed in your own Microsoft
+Foundry resource on its MAI chat-completions route (`{base_url}/mai/v1/chat/completions`, `api-key` header). Set
+`adapter_options.base_url` to the resource endpoint; `model` is the deployment name. There is no `/models` route, so
+qualification checks identity with one tiny completion, compares the reported model case-insensitively with
+`served_model`, and records the deployment's `model_version` as declared, not verified. Only `max_output_tokens` is
+supported: the service silently ignores unknown fields, and `reasoning_effort` is validated but undocumented. With
+`replay_reasoning: true`, reasoning is requested encrypted and replayed exactly (the service rejects an altered blob).
+Microsoft publishes no cached-input price and responses usually report a few cached tokens, so such a call's cost is
+unknown, with the full-input-rate upper bound recorded as `api_cost_usd_if_uncached`. Microsoft's docs list a default
+quota tier of 0 tokens per minute (every call is a 429) until a higher tier is granted.
 
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
@@ -137,7 +148,8 @@ captured traffic, and any artifact, record, or frozen config containing a loaded
 string is rejected rather than written. Use `--secrets PATH` for a file elsewhere. Without the file,
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
 `GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi;
-`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere; `MODEL_API_KEY` for Meta).
+`ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere; `MODEL_API_KEY` for Meta;
+`AZURE_INFERENCE_CREDENTIAL` for Microsoft MAI).
 
 ## Live debugging run
 
