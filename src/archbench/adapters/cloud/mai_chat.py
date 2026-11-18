@@ -358,10 +358,13 @@ class MaiAdapter:
             return failure(FailureKind.REFUSAL, {"type": "content_filter", "refusal": message.get("refusal")})
         if reason not in ("stop", "length"):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "finish_reason", "reason": reason})
-        reasoned = (observations["reasoning_tokens"].value or 0) > 0
-        if config.adapter_options.get("replay_reasoning") and reasoned and not _encrypted_reasoning(message):
-            # Without the blob a follow-up would silently drop the model's reasoning from its context.
-            return failure(FailureKind.PROVIDER_ERROR, {"type": "missing_encrypted_reasoning"})
+        # Without the blob a follow-up would silently drop the model's reasoning from its context. A missing blob is
+        # acceptable only when the response explicitly reports zero reasoning tokens; an unreported count is not zero.
+        reasoning_tokens = observations["reasoning_tokens"].value
+        if (config.adapter_options.get("replay_reasoning") and reasoning_tokens != 0
+                and not _encrypted_reasoning(message)):
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "missing_encrypted_reasoning",
+                                                        "reasoning_tokens": reasoning_tokens})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason,
                                request_id=data.get("id"), cost_incurred=CostIncurred.YES, observations=observations)
 

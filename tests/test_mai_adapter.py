@@ -186,6 +186,7 @@ def test_failures_are_mapped_and_never_retried(tmp_path: Path, reply: Any, kind:
     (completion(finish="tool_calls"), FailureKind.PROVIDER_ERROR),
     (completion(model="mai-code-2-flash"), FailureKind.PROVIDER_ERROR),
     (completion(blob=None), FailureKind.PROVIDER_ERROR),  # reasoned, but nothing to replay
+    (completion(blob=None, reasoning_tokens=None), FailureKind.PROVIDER_ERROR),  # unreported is not zero
 ])
 def test_unusable_responses_are_failures(tmp_path: Path, body: dict[str, Any], kind: FailureKind) -> None:
     outcome, _ = call(tmp_path, MockMai(reply=httpx2.Response(200, json=body)))
