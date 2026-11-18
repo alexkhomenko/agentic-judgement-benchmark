@@ -134,6 +134,11 @@ def test_model_echo_is_compared_case_insensitively(tmp_path: Path, served: str) 
     assert outcome.succeeded
 
 
+def test_an_echo_of_the_deployment_name_does_not_satisfy_a_conflicting_served_model(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, MockMai(), with_options(served_model="mai-code-2-flash"))
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR
+
+
 def test_cost_with_and_without_a_cached_input_price() -> None:
     usage = completion()["usage"]
     unknown = _observations(CONFIG, usage)
@@ -244,6 +249,8 @@ def test_qualification_verifies_identity_with_one_probe() -> None:
 
 @pytest.mark.parametrize(("config", "mock", "expected"), [
     (CONFIG, MockMai(served="mai-code-2-flash"), "serves mai-code-2-flash"),
+    # The reviewer's reproduction: the echo matches the deployment name but contradicts served_model.
+    (with_options(served_model="mai-code-2-flash"), MockMai(), "its deployment name, not served_model mai-code-2-flash"),
     (CONFIG, MockMai(reply=httpx2.Response(404, json={"error": {"code": "DeploymentNotFound",
                                                                  "message": "The deployment does not exist"}})),
      "HTTP 404"),

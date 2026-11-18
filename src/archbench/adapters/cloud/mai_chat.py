@@ -5,7 +5,8 @@ Plain HTTP against the REST API: the recorded request is exactly the JSON body o
 - No client-side retries: every retry is a new harness attempt.
 - `model` is the DEPLOYMENT name in your resource. Responses name the model, not the deployment, and not in the
   requested case (deployment `MAI-Thinking-1` is answered as `mai-thinking-1`, observed 2026-11-18), so the echo is
-  compared case-insensitively against the configured `served_model` and the deployment name.
+  compared case-insensitively against the configured `served_model` only. The deployment name is a label you chose,
+  so an echo that matches it but not `served_model` does not identify the model and is treated as a mismatch.
 - No `/models` route exists on `/mai/v1` (404, observed 2026-11-18) and the deployment's model version is not
   readable with an API key. Qualification therefore verifies identity with one tiny live completion, and the
   configured `model_version` is declared, not verified.
@@ -176,6 +177,11 @@ class MaiAdapter:
                            "cost_usd": _observations(config, data.get("usage") or {})["api_cost_usd"].value})
         echoed = data.get("model")
         if not _same_model(config, echoed):
+            if isinstance(echoed, str) and echoed.casefold() == config.model.casefold():
+                return QualificationCheck(
+                    name="model_identity", passed=False,
+                    detail=f"deployment {config.model} answers as {echoed}, its deployment name, not served_model "
+                           f"{served}: the served model cannot be verified")
             return QualificationCheck(name="model_identity", passed=False,
                                       detail=f"deployment {config.model} serves {echoed}, expected {served}")
         version = config.adapter_options.get("model_version")
@@ -395,10 +401,9 @@ class MaiAdapter:
 
 
 def _same_model(config: ModelConfiguration, echoed: Any) -> bool:
-    if not isinstance(echoed, str):
-        return False
-    accepted = {config.model, config.adapter_options.get("served_model")}
-    return echoed.casefold() in {str(a).casefold() for a in accepted if a}
+    """The echo must name the configured served model; the deployment name alone proves nothing."""
+    served = config.adapter_options.get("served_model")
+    return isinstance(echoed, str) and isinstance(served, str) and bool(served) and echoed.casefold() == served.casefold()
 
 
 def _encrypted_reasoning(message: dict[str, Any]) -> bool:
