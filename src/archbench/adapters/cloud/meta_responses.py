@@ -18,8 +18,9 @@ handling, model-echo checks and extraction are inherited from `OpenAIAdapter`. D
   safety block is HTTP 400 `content_policy_violation` (a refusal with unknown cost); 402 is a billing problem;
   504 means a non-streaming request ran too long (ambiguous, cost unknown). Meta documents no request-id header,
   but responses carry `x-request-id` (observed 2026-11-16), which is recorded as the request id.
-- Wonder and Spark have no long-context price; Ember prices a whole request at long-context rates above 200K input
-  tokens (configure `pricing.long_context` with `threshold_input_tokens: 200000` for Ember).
+- Wonder and Spark have no long-context price, so no guard applies to them. Ember prices a whole request at
+  long-context rates above 200K input tokens: configure `pricing.long_context` with `threshold_input_tokens: 200000`,
+  or such requests are reported with unknown cost instead of base rates.
 
 Configuration parameters: those of `OpenAIAdapter` except `verbosity` (not implemented by Meta):
     max_output_tokens (required, includes reasoning), reasoning_effort, reasoning_summary, temperature.
@@ -40,6 +41,8 @@ from .wire import CapturingTransport
 
 META_BASE_URL = "https://api.meta.ai/v1"
 CONTRIBUTOR_SUFFIX = "-contributor"
+# Models whose whole request is priced at long-context rates above this many input tokens (docs/pricing-rate-limits).
+LONG_CONTEXT_THRESHOLDS = {"muse-ember-": 200_000}
 CONTEXT_OVERFLOW = re.compile(r"(?i)context (length|window)|maximum context|too long")
 
 
@@ -50,7 +53,10 @@ class MetaAdapter(OpenAIAdapter):
     credentials_hint = ("no Meta Model API key found: add meta.api_key to secrets.local.yaml "
                         "(see secrets.example.yaml) or set MODEL_API_KEY")
     supported_parameters = frozenset({"max_output_tokens", "reasoning_effort", "reasoning_summary", "temperature"})
-    long_context_guard_tokens = None  # per-model: configure pricing.long_context where Meta charges it (Ember)
+
+    def _long_context_guard(self, config: ModelConfiguration) -> int | None:
+        """Ember's long-context threshold; None for Wonder and Spark, which Meta prices at one rate."""
+        return next((t for prefix, t in LONG_CONTEXT_THRESHOLDS.items() if config.model.startswith(prefix)), None)
 
     def _client(self, config: ModelConfiguration, transport: CapturingTransport) -> openai.OpenAI:
         if not self._api_key:

@@ -76,7 +76,8 @@ class OpenAIAdapter:
                         "(see secrets.example.yaml) or set OPENAI_API_KEY")
     supported_parameters: frozenset[str] = SUPPORTED_PARAMETERS
     # Above this many input tokens a request may be priced at long-context rates; without `pricing.long_context`
-    # its cost is reported as unknown. None: the provider has no long-context pricing.
+    # its cost is reported as unknown. None: no long-context pricing. Subclasses whose rule depends on the model
+    # override `_long_context_guard`.
     long_context_guard_tokens: int | None = 272_000
 
     def __init__(self, *, api_key: str | None = None, transport_factory: TransportFactory | None = None) -> None:
@@ -332,7 +333,7 @@ class OpenAIAdapter:
                                CostIncurred.YES)
         body = json.loads(exchange["response_body"])
         request_id = exchange["response_headers"].get("x-request-id")
-        observations = _observations(config, body.get("usage") or {}, self.long_context_guard_tokens)
+        observations = _observations(config, body.get("usage") or {}, self._long_context_guard(config))
 
         def failure(kind: FailureKind, error: dict[str, Any]) -> NativeExecution:
             return NativeExecution(status="failed", native_response=body, request_id=request_id,
@@ -358,6 +359,9 @@ class OpenAIAdapter:
             status="completed", native_response=body, finish_reason=_finish_reason(body), request_id=request_id,
             cost_incurred=CostIncurred.YES, observations=observations,
         )
+
+    def _long_context_guard(self, config: ModelConfiguration) -> int | None:
+        return self.long_context_guard_tokens
 
     def _status_failure(self, exc: openai.APIStatusError) -> tuple[FailureKind, CostIncurred]:
         code = _error_code(exc)
