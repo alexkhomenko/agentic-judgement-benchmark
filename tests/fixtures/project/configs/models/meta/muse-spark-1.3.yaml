@@ -10,7 +10,9 @@
 # and is returned only as encrypted content, replayed exactly on follow-ups.
 # native_recommended profile: provider defaults; only max_output_tokens is set. Facts from dev.meta.ai/docs
 # (models, choose-a-model, muse-spark, reasoning, protocols/responses, api-reference/responses, error-handling,
-# authentication, pricing-rate-limits) and dev.meta.ai/legal/commitments, read 2026-11-16.
+# authentication, pricing-rate-limits) and dev.meta.ai/legal/commitments, read 2026-11-16. Qualified live on
+# 2026-11-16: responses echoed reasoning.effort high, temperature 1.0, top_p 1.0, service_tier default; reasoning
+# items carried encrypted_content with an empty summary, and replaying them was accepted.
 configuration_id: muse-spark-1.3
 revision: 1
 track: cloud

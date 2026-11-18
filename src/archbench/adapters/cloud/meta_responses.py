@@ -16,7 +16,8 @@ handling, model-echo checks and extraction are inherited from `OpenAIAdapter`. D
   encrypted content, which is replayed exactly.
 - Error mapping: a too-long prompt is HTTP 400 with `code: null` and a message about the context length; a
   safety block is HTTP 400 `content_policy_violation` (a refusal with unknown cost); 402 is a billing problem;
-  504 means a non-streaming request ran too long (ambiguous, cost unknown). Meta documents no request-id header.
+  504 means a non-streaming request ran too long (ambiguous, cost unknown). Meta documents no request-id header,
+  but responses carry `x-request-id` (observed 2026-11-16), which is recorded as the request id.
 - Wonder and Spark have no long-context price; Ember prices a whole request at long-context rates above 200K input
   tokens (configure `pricing.long_context` with `threshold_input_tokens: 200000` for Ember).
 
