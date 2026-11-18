@@ -24,8 +24,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 DEFAULT_SECRETS_FILE = "secrets.local.yaml"
 PROVIDERS = (
-    "anthropic", "bedrock", "cohere", "deepseek", "google", "minimax", "mistral", "moonshot", "openai", "typesafe",
-    "xai", "zhipu",
+    "anthropic", "bedrock", "cohere", "deepseek", "google", "meta", "microsoft", "minimax", "mistral", "moonshot",
+    "openai", "typesafe", "xai", "zhipu",
 )
 KEY_PATTERNS = (
     re.compile(r"sk-ant-[A-Za-z0-9_-]{8,}"),
@@ -34,6 +34,7 @@ KEY_PATTERNS = (
     re.compile(r"\bxai-[A-Za-z0-9]{20,}"),  # xAI API keys
     re.compile(r"\bABSKQmVkcm9ja0FQSUtleS[A-Za-z0-9+/]{8,}"),  # Amazon Bedrock long-term API keys
     re.compile(r"\bbedrock-api-key-[A-Za-z0-9+/=_-]{20,}"),  # Amazon Bedrock short-term API keys
+    re.compile(r"\bLLM_\d{6,}_[A-Za-z0-9_-]{16,}"),  # Meta Model API keys
 )
 
 
@@ -59,6 +60,8 @@ class LocalSecrets(BaseModel):
     cohere: ProviderCredentials | None = None
     deepseek: ProviderCredentials | None = None
     google: ProviderCredentials | None = None
+    meta: ProviderCredentials | None = None
+    microsoft: ProviderCredentials | None = None
     minimax: ProviderCredentials | None = None
     mistral: ProviderCredentials | None = None
     moonshot: ProviderCredentials | None = None

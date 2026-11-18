@@ -67,6 +67,8 @@ def test_documented_template_copy_loads(tmp_path: Path) -> None:
     assert secrets.api_key("minimax") == "<your MiniMax API key>"
     assert secrets.api_key("cohere") == "<your Cohere API key>"
     assert secrets.api_key("bedrock") == "<your Amazon Bedrock API key>"
+    assert secrets.api_key("meta") == "<your Meta Model API key>"
+    assert secrets.api_key("microsoft") == "<your Microsoft Foundry key>"
 
 
 def test_readable_by_others_is_refused(tmp_path: Path) -> None:
@@ -146,6 +148,8 @@ def test_cli_refuses_unsafe_secrets_file(tmp_path: Path, capsys: pytest.CaptureF
     ("minimax", "minimax", "MINIMAX_API_KEY"),
     ("cohere", "cohere", "CO_API_KEY"),
     ("bedrock", "bedrock", "AWS_BEARER_TOKEN_BEDROCK"),
+    ("meta", "meta", "MODEL_API_KEY"),
+    ("microsoft", "mai", "AZURE_INFERENCE_CREDENTIAL"),
 ])
 def test_provider_key_from_file_or_environment_is_guarded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str, adapter_name: str, env_var: str,

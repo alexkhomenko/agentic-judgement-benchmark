@@ -66,14 +66,19 @@ TransportFactory = Callable[[], httpx2.BaseTransport]
 
 
 class OpenAIAdapter:
-    """Also the base for providers that serve the same Responses API (see `xai_responses`): subclasses set
-    the class attributes below and may override `_client` and `_model_check`."""
+    """Also the base for providers that serve the same Responses API (see `xai_responses`, `meta_responses`):
+    subclasses set the class attributes below and may override `_client`, `_model_check` and `_status_failure`."""
 
     name = "openai"
     provider = "openai"
     base_url: str | None = None  # None: the SDK default
     credentials_hint = ("no OpenAI credentials found: add openai.api_key to secrets.local.yaml "
                         "(see secrets.example.yaml) or set OPENAI_API_KEY")
+    supported_parameters: frozenset[str] = SUPPORTED_PARAMETERS
+    # Above this many input tokens a request may be priced at long-context rates; without `pricing.long_context`
+    # its cost is reported as unknown. None: no long-context pricing. Subclasses whose rule depends on the model
+    # override `_long_context_guard`.
+    long_context_guard_tokens: int | None = 272_000
 
     def __init__(self, *, api_key: str | None = None, transport_factory: TransportFactory | None = None) -> None:
         # api_key=None lets the SDK resolve credentials from OPENAI_API_KEY.
@@ -102,7 +107,7 @@ class OpenAIAdapter:
 
     def qualify(self, config: ModelConfiguration, requirements: QualificationRequirements) -> QualificationReport:
         explicit_names = {n for n, s in config.parameters.items() if s.state is ParameterState.EXPLICIT}
-        unsupported = sorted(explicit_names - SUPPORTED_PARAMETERS)
+        unsupported = sorted(explicit_names - self.supported_parameters)
         model_check = self._model_check(config)
         parameter_check = QualificationCheck(
             name="parameter_support",
@@ -311,18 +316,8 @@ class OpenAIAdapter:
             cost = CostIncurred.UNKNOWN if dispatched() else CostIncurred.NO
             return failed(FailureKind.TRANSIENT_TRANSPORT, "connection", str(exc), cost)
         except openai.APIStatusError as exc:
-            code = _error_code(exc)
-            if exc.status_code == 429 and code == "insufficient_quota":
-                kind = FailureKind.PROVIDER_ERROR  # out of credit: retrying cannot help
-            elif exc.status_code == 429:
-                kind = FailureKind.RATE_LIMITED
-            elif code == "context_length_exceeded":
-                kind = FailureKind.CONTEXT_EXCEEDED
-            elif exc.status_code >= 500:
-                kind = FailureKind.TRANSIENT_TRANSPORT
-            else:
-                kind = FailureKind.PROVIDER_ERROR
-            return failed(kind, type(exc).__name__, str(exc), CostIncurred.NO, status=exc.status_code, code=code,
+            kind, cost = self._status_failure(exc)
+            return failed(kind, type(exc).__name__, str(exc), cost, status=exc.status_code, code=_error_code(exc),
                           request_id=exc.response.headers.get("x-request-id"))
         except openai.OpenAIError as exc:
             if dispatched():
@@ -338,7 +333,7 @@ class OpenAIAdapter:
                                CostIncurred.YES)
         body = json.loads(exchange["response_body"])
         request_id = exchange["response_headers"].get("x-request-id")
-        observations = _observations(config, body.get("usage") or {})
+        observations = _observations(config, body.get("usage") or {}, self._long_context_guard(config))
 
         def failure(kind: FailureKind, error: dict[str, Any]) -> NativeExecution:
             return NativeExecution(status="failed", native_response=body, request_id=request_id,
@@ -364,6 +359,21 @@ class OpenAIAdapter:
             status="completed", native_response=body, finish_reason=_finish_reason(body), request_id=request_id,
             cost_incurred=CostIncurred.YES, observations=observations,
         )
+
+    def _long_context_guard(self, config: ModelConfiguration) -> int | None:
+        return self.long_context_guard_tokens
+
+    def _status_failure(self, exc: openai.APIStatusError) -> tuple[FailureKind, CostIncurred]:
+        code = _error_code(exc)
+        if exc.status_code == 429 and code == "insufficient_quota":
+            return FailureKind.PROVIDER_ERROR, CostIncurred.NO  # out of credit: retrying cannot help
+        if exc.status_code == 429:
+            return FailureKind.RATE_LIMITED, CostIncurred.NO
+        if code == "context_length_exceeded":
+            return FailureKind.CONTEXT_EXCEEDED, CostIncurred.NO
+        if exc.status_code >= 500:
+            return FailureKind.TRANSIENT_TRANSPORT, CostIncurred.NO
+        return FailureKind.PROVIDER_ERROR, CostIncurred.NO
 
     def extract(self, execution: NativeExecution) -> ExtractedResponse:
         body = execution.native_response
@@ -425,7 +435,8 @@ def _finish_reason(body: dict[str, Any]) -> str | None:
     return f"{status}:{reason}" if status == "incomplete" and reason else status
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _observations(config: ModelConfiguration, usage: dict[str, Any], long_context_guard_tokens: int | None = 272_000
+                  ) -> dict[str, Observation]:
     source = "openai usage"
     details = usage.get("input_tokens_details") or {}
     writes = details.get("cache_write_tokens_details") or {}
@@ -443,7 +454,7 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
         else Observation.missing("tokens", source, "not reported in usage")
         for name, v in values.items()
     }
-    configured = _cost(config, obs)
+    configured = _cost(config, obs, long_context_guard_tokens)
     ticks = usage.get("cost_in_usd_ticks")
     if isinstance(ticks, int):
         # Provider-reported cost (xAI: 1 USD = 10^10 ticks) is the billing record; the configured price table
@@ -456,7 +467,8 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
     return obs
 
 
-def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observation:
+def _cost(config: ModelConfiguration, obs: dict[str, Observation], long_context_guard_tokens: int | None = 272_000
+          ) -> Observation:
     pricing = config.adapter_options.get("pricing")
     if not isinstance(pricing, dict):
         return Observation.missing("usd", "configuration pricing", "no pricing in configuration")
@@ -474,7 +486,7 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
     if isinstance(long_context, dict) and isinstance(threshold, int):
         if input_tokens > threshold:
             rates = long_context
-    elif input_tokens > 272_000:
+    elif long_context_guard_tokens is not None and input_tokens > long_context_guard_tokens:
         return Observation.missing("usd", "configuration pricing",
                                    "request may be priced at long-context rates, which are not configured")
     cached, w30, w12 = count("cached_input_tokens"), count("cache_write_30m_tokens"), count("cache_write_12h_tokens")

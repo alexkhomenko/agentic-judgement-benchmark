@@ -14,6 +14,8 @@ from .cloud.deepseek_chat import DeepSeekAdapter
 from .cloud.gemini_generate import GeminiAdapter
 from .cloud.glm_chat import GlmAdapter
 from .cloud.kimi_chat import KimiAdapter
+from .cloud.mai_chat import MaiAdapter
+from .cloud.meta_responses import MetaAdapter
 from .cloud.minimax_messages import MiniMaxAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
@@ -80,6 +82,15 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     bedrock_key = secrets.api_key("bedrock") or os.environ.get("AWS_BEARER_TOKEN_BEDROCK") or None
     if bedrock_key:
         GUARD.register(bedrock_key)
+    # Meta Model API key; MODEL_API_KEY is the variable Meta's samples use (no SDK reads it automatically).
+    meta_key = secrets.api_key("meta") or os.environ.get("MODEL_API_KEY") or None
+    if meta_key:
+        GUARD.register(meta_key)
+    # Microsoft Foundry resource key for MAI deployments; AZURE_INFERENCE_CREDENTIAL is the Azure AI Inference samples'
+    # variable. AZURE_OPENAI_API_KEY is never read: it belongs to a different service and may name another resource.
+    microsoft_key = secrets.api_key("microsoft") or os.environ.get("AZURE_INFERENCE_CREDENTIAL") or None
+    if microsoft_key:
+        GUARD.register(microsoft_key)
     return AdapterRegistry({
         "fake": FakeAdapter(),
         "fake-judge": FakeJudgeAdapter(),
@@ -88,6 +99,8 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "gemini": GeminiAdapter(api_key=google_key),
         "mistral": MistralAdapter(api_key=mistral_key),
         "xai": XAIAdapter(api_key=xai_key),
+        "meta": MetaAdapter(api_key=meta_key),
+        "mai": MaiAdapter(api_key=microsoft_key),
         "deepseek": DeepSeekAdapter(api_key=deepseek_key),
         "glm": GlmAdapter(api_key=zhipu_key),
         "kimi": KimiAdapter(api_key=moonshot_key),

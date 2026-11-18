@@ -1,0 +1,51 @@
+# TEST FIXTURE: frozen snapshot for the harness tests. Experiments use the project's own configs/.
+# MAI-Thinking-1 candidate: Microsoft AI's own reasoning model (sparse Mixture-of-Experts, 35B active / 1T total
+# parameters; "trained from the ground up ... without distillation from third-party models"), PREVIEW on Microsoft
+# Foundry with no SLA. Deploy it into your own Foundry resource first (GlobalStandard only, version 2026-06-01):
+#   az cognitiveservices account deployment create ... --deployment-name mai-thinking-1 --model-name mai-thinking-1 \
+#     --model-format Microsoft --model-version 2026-06-01 --sku-name GlobalStandard
+# then set adapter_options.base_url to the resource endpoint. `model` is the DEPLOYMENT name.
+# QUOTA: the default (Low) tier is 0 tokens per minute; calls fail with 429 until the subscription has the Medium
+# (100K TPM) or High (250K TPM) tier. How a tier is granted is not documented.
+# IDENTITY: responses name the deployment or "MAI-Thinking-1", never a version; the version below is declared.
+# CONTENT SAFETY: Microsoft screens every prompt and output; blocks are refusals (HTTP 400 or finish_reason
+# "content filter"). Categories and thresholds are not documented.
+# Only max_completion_tokens is documented: no temperature, top_p, seed or reasoning-effort controls.
+# Reasoning is requested as encrypted content (reasoning_display: encrypted) so follow-ups replay it exactly.
+# Observed live on 2026-11-18 (POST {resource}/mai/v1/chat/completions, api-key header): no /models route (404);
+# deployment MAI-Thinking-1 answered as model "mai-thinking-1" (compared case-insensitively); unknown request fields
+# are silently ignored; reasoning_effort is validated (none..max) but undocumented, so not used; the encrypted blob
+# arrives as message.reasoning.encrypted_content, replaying it is accepted and re-read (prompt tokens grow), and an
+# altered blob is a 400. Every response reports ~2 cached prompt tokens, so cost is unknown until a cached-input
+# price is confirmed (upper bound recorded as api_cost_usd_if_uncached). Intermittent TLS EOFs on connect (retryable).
+# Facts from learn.microsoft.com/azure/foundry (use-foundry-models-mai-thinking, updated 2026-08-12;
+# models-sold-directly-by-azure; models-sold-directly-by-azure-region-availability, updated 2026-10-19), the
+# ai.azure.com MAI-Thinking-1 model card, and the Foundry launch blog (pricing), read 2026-11-16.
+configuration_id: mai-thinking-1
+revision: 1
+track: cloud
+adapter: mai
+provider: microsoft
+model: mai-thinking-1  # your deployment name
+profile: native_recommended
+context_limit: 256000  # model card: 256K per request, input plus output
+parameters:
+  max_output_tokens:
+    state: explicit
+    value: 16000
+    source: same ceiling as the other candidates; max_completion_tokens includes reasoning tokens (output capped at 64K)
+adapter_options:
+  base_url: "https://example-resource.services.ai.azure.com"  # your Foundry resource endpoint
+  served_model: mai-thinking-1  # as responses report it (observed 2026-11-18)
+  model_version: "2026-06-01"  # the version the deployment was created with; not verifiable with an API key
+  max_output_tokens_limit: 64000  # model card: 64000 output tokens
+  replay_reasoning: true
+  timeout_s: 900  # no server-side limit documented
+  pricing:
+    # Per 1M tokens. Microsoft's launch blog: "Pricing starts at $2 USD per 1M tokens for input and $8 USD per 1M
+    # tokens for output." The model card's pricing section is empty and no cached-input price is published, so a
+    # response with cached prompt tokens has unknown cost until cached_input_usd_per_mtok is confirmed.
+    input_usd_per_mtok: 2.00
+    output_usd_per_mtok: 8.00
+    source: Microsoft Foundry blog "New MAI models in Microsoft Foundry" (updated 2026-08-12), read 2026-11-16
+    verified_on: "2026-11-16"

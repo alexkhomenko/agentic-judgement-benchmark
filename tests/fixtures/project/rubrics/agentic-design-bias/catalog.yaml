@@ -47,3 +47,5 @@ items:
   - {id: minimax, name: MiniMax, vendor: minimax, kind: model, model_coupling: vendor_model, open_weights: true}
   - {id: cohere-command, name: Cohere Command, aliases: [Command R, Command R+, Command A], vendor: cohere, kind: model, model_coupling: vendor_model, open_weights: null}
   - {id: amazon-nova, name: Amazon Nova, vendor: aws, kind: model, model_coupling: vendor_model, open_weights: false}
+  - {id: muse, name: Muse, aliases: [Muse Spark, Muse Wonder, Muse Ember], vendor: meta, kind: model, model_coupling: vendor_model, open_weights: null}
+  - {id: mai, name: MAI, aliases: [MAI-Thinking], vendor: microsoft, kind: model, model_coupling: vendor_model, open_weights: false}
