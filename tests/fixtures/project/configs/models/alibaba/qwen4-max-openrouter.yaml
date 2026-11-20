@@ -11,8 +11,9 @@
 #   max_tokens, turns on search, names another model, or drops the replayed reasoning (native preserve_thinking
 #   replays it). Pin anything else you see in the echo with adapter_options.upstream_expect.
 # - reasoning_effort is SENT as "high", Alibaba's documented default, because OpenRouter does not document what it
-#   sends when `reasoning` is omitted. How OpenRouter maps it (reasoning_effort or a thinking_budget) is visible in
-#   the upstream echo: confirm it before a reported run.
+#   sends when `reasoning` is omitted. The forwarded reasoning_effort and enable_thinking must agree with "high",
+#   and preserve_thinking with its documented default, or qualification fails. Any other forwarded control (e.g.
+#   a thinking_budget derived from the effort) leaves qualification incomplete until pinned in upstream_expect.
 # - Alibaba-only switches (enable_thinking, preserve_thinking, enable_search) cannot be sent: OpenRouter does not
 #   list them, and require_parameters would refuse to route. Their native defaults are checked in the echo.
 # - Prices are OpenRouter's (5% below Model Studio Singapore). OpenRouter reports supports_implicit_caching: false,
@@ -73,7 +74,7 @@ parameters:
     verified_on: 2026-11-16
 adapter_options:
   upstream_model: qwen4-max-20261115  # from the endpoint name; must also be the model id forwarded to Alibaba
-  upstream_expect: {}  # e.g. {enable_thinking: true, reasoning_effort: high} once the echo shows OpenRouter's mapping
+  upstream_expect: {}  # pin forwarded keys the configuration does not determine, e.g. {thinking_budget: 131072}
   timeout_s: 900
   pricing:
     # Per 1M tokens, OpenRouter's Alibaba endpoint (USD per token in the endpoints JSON x 1e6). Qualification fails

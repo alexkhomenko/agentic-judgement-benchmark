@@ -22,8 +22,14 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
 - UPSTREAM CHECK: OpenRouter translates the request into the vendor's format. Qualification sends one streamed
   follow-up with `debug.echo_upstream_body` (streaming only, best-effort redacted) and checks the body OpenRouter
   forwarded: the vendor model id must be `adapter_options.upstream_model`; parameters the configuration omits must
-  not be injected; `max_tokens` must be unchanged; replayed reasoning must be forwarded; `enable_search` must not be
-  on; and every key in `adapter_options.upstream_expect` must match. The echo is recorded in the probes.
+  not be injected; an output cap (`max_tokens` or `max_completion_tokens`) must be present and unchanged; replayed
+  reasoning must be forwarded; `enable_search` must not be on; and every key in `adapter_options.upstream_expect`
+  must match. Reasoning controls (enable_thinking, reasoning_effort, thinking_budget, preserve_thinking) must
+  follow from the configuration: the configured effort, else an omitted parameter's documented default; a
+  configured effort that reaches the vendor as no control at all fails. Any forwarded key the configuration does
+  not determine (e.g. a thinking_budget OpenRouter derived from the effort) leaves the check NOT EVALUATED, so
+  qualification cannot pass, until it is checked against the vendor's docs and pinned in `upstream_expect`.
+  The echo is recorded in the probes.
 - Cancellation is not supported for Alibaba: an abandoned request runs, and is billed, to completion.
 - Refusals: OpenRouter moderation (HTTP 403 with flagged metadata), a vendor content block (Alibaba's
   `data_inspection_failed`), or finish_reason `content_filter`.
@@ -93,6 +99,11 @@ METADATA_HEADER = {"x-openrouter-metadata": "enabled"}
 SAMPLING = ("temperature", "top_p", "top_k", "presence_penalty")
 SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "reasoning_effort", *SAMPLING})
 REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+OUTPUT_LIMIT_KEYS = ("max_tokens", "max_completion_tokens")  # vendor-side names for the output cap
+# Vendor-side reasoning controls (Alibaba: enable_thinking, reasoning_effort, thinking_budget, preserve_thinking).
+THINKING_KEYS = ("enable_thinking", "reasoning_effort", "thinking_budget", "preserve_thinking")
+# Forwarded keys that need no verification: the request itself and streaming plumbing (the probe streams).
+NEUTRAL_KEYS = frozenset({"model", "messages", "stream", "stream_options"})
 REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")  # where a vendor body may carry earlier reasoning
 UPSTREAM_REPORTED = ("model", "max_tokens", "max_completion_tokens", "enable_thinking", "reasoning_effort",
                      "thinking_budget", "preserve_thinking", "enable_search", *SAMPLING, "stream")
@@ -279,12 +290,22 @@ class OpenRouterAdapter:
                                       detail="not evaluated: the stream carried no debug.echo_upstream_body chunk")
         record.update(upstream_provider=(debug or {}).get("provider"), upstream_body=echo)
         returned = _choice(execution.native_response or {}).get("message") or {}
-        problems = _upstream_problems(config, echo, (debug or {}).get("provider"), bool(_reasoning_text(returned)))
+        problems, unverified = _upstream_problems(config, echo, (debug or {}).get("provider"),
+                                                  bool(_reasoning_text(returned)))
         reported = {k: echo[k] for k in UPSTREAM_REPORTED if k in echo}
         detail = (f"forwarded to {(debug or {}).get('provider')}: {json.dumps(reported, sort_keys=True)}; "
                   f"top-level keys {sorted(echo)}")
-        return QualificationCheck(name="upstream_request", passed=not problems,
-                                  detail="; ".join(problems) + f" ({detail})" if problems else detail)
+        if problems:
+            return QualificationCheck(name="upstream_request", passed=False,
+                                      detail="; ".join(problems) + f" ({detail})")
+        if unverified:
+            # Not a contradiction, but not shown to match the configuration either: qualification stays incomplete
+            # until the values are checked against the vendor's docs and pinned in adapter_options.upstream_expect.
+            pins = json.dumps({k: echo[k] for k in unverified}, sort_keys=True)
+            return QualificationCheck(name="upstream_request", passed=None,
+                                      detail=f"not verified: OpenRouter forwarded {pins}, which the configuration "
+                                             f"does not determine; pin them in upstream_expect ({detail})")
+        return QualificationCheck(name="upstream_request", passed=True, detail=detail)
 
     def _continuation_check(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
         """Live probe: one baseline, then two sibling follow-ups forked from the same snapshot."""
@@ -536,9 +557,11 @@ def _pricing_problems(config: ModelConfiguration, live: dict[str, Any]) -> list[
     return problems
 
 
-def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any, reasoned: bool) -> list[str]:
+def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any, reasoned: bool
+                       ) -> tuple[list[str], list[str]]:
+    """Contradictions between the forwarded body and the configuration, and forwarded keys nothing accounts for."""
     route = ROUTES[config.provider]
-    problems = []
+    problems: list[str] = []
     if provider is not None and str(provider) != route.name:
         problems.append(f"forwarded to {provider!r}, not {route.name!r}")
     if echo.get("model") != config.adapter_options.get("upstream_model"):
@@ -550,10 +573,15 @@ def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provide
             problems.append(f"{name} omitted in configuration but forwarded as {echo[name]!r}")
         elif configured is not None and echo.get(name) != configured:
             problems.append(f"{name} {configured!r} forwarded as {echo.get(name)!r}")
+    # The output cap must reach the vendor unchanged: without it the vendor's default (up to 262144 thinking-mode
+    # tokens on Qwen4-Max) would set output length and spend.
     budget = explicit(config, "max_output_tokens")
-    for key in ("max_tokens", "max_completion_tokens"):
-        if key in echo and echo[key] != budget:
-            problems.append(f"{key} forwarded as {echo[key]!r}, configured {budget}")
+    limits = {key: echo[key] for key in OUTPUT_LIMIT_KEYS if key in echo}
+    if not limits:
+        problems.append(f"no output cap forwarded (none of {list(OUTPUT_LIMIT_KEYS)}), configured {budget}")
+    for key, value in limits.items():
+        if value != budget:
+            problems.append(f"{key} forwarded as {value!r}, configured {budget}")
     if echo.get("enable_search"):
         problems.append("enable_search is on")
     if reasoned:
@@ -561,10 +589,45 @@ def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provide
         if not any(m.get(k) for m in assistants for k in REASONING_KEYS):
             problems.append("earlier reasoning is not forwarded to the vendor (it was returned and replayed)")
     expect = config.adapter_options.get("upstream_expect") or {}
-    for key, value in (expect.items() if isinstance(expect, dict) else ()):
+    expect = expect if isinstance(expect, dict) else {}
+    for key, value in expect.items():
         if echo.get(key) != value:
             problems.append(f"upstream_expect {key}={value!r}, forwarded {echo.get(key)!r}")
-    return problems
+    explained, reasoning_problems = _thinking_check(config, echo, expect)
+    problems.extend(reasoning_problems)
+    explained |= NEUTRAL_KEYS | set(OUTPUT_LIMIT_KEYS) | set(SAMPLING) | set(expect)
+    if echo.get("enable_search") is False:
+        explained.add("enable_search")
+    return problems, sorted(set(echo) - explained)
+
+
+def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: dict[str, Any]
+                    ) -> tuple[set[str], list[str]]:
+    """The forwarded reasoning controls must follow from the configuration: the configured effort, else the
+    documented default of an omitted parameter of the same name, else a value pinned in upstream_expect."""
+    effort = explicit(config, "reasoning_effort")
+    explained: set[str] = set()
+    problems: list[str] = []
+    for key in THINKING_KEYS:
+        if key not in echo or key in expect:
+            continue
+        value = echo[key]
+        setting = config.parameters.get(key)
+        if key == "reasoning_effort" and effort is not None:
+            wanted: Any = effort
+        elif key == "enable_thinking" and effort is not None:
+            wanted = effort != "none"
+        elif (setting is not None and setting.state is ParameterState.OMITTED
+              and setting.documented_default is not None):
+            wanted = setting.documented_default
+        else:
+            continue  # nothing in the configuration determines it: left unverified
+        explained.add(key)
+        if value != wanted:
+            problems.append(f"{key} forwarded as {value!r}, configuration implies {wanted!r}")
+    if effort is not None and not any(k in echo for k in ("enable_thinking", "reasoning_effort", "thinking_budget")):
+        problems.append(f"reasoning_effort {effort!r} configured but no reasoning control was forwarded")
+    return explained, problems
 
 
 def _sse_chunks(text: str) -> list[dict[str, Any]]:

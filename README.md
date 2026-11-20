@@ -99,7 +99,9 @@ uses model fallbacks or variants, and opts into routing metadata; a response who
 or that names another model, is a failure. Qualification reads the model's OpenRouter endpoints (exactly one Alibaba
 endpoint, serving `upstream_model`, with the configured prices) and streams one follow-up with
 `debug.echo_upstream_body` to check what OpenRouter actually forwards to Alibaba: the vendor model id, no injected
-sampling defaults, unchanged `max_tokens`, search off, replayed reasoning present, and any `upstream_expect` keys.
+sampling defaults, an output cap that is present and unchanged, search off, replayed reasoning present, reasoning controls that agree with the configured effort and documented
+defaults, and any `upstream_expect` keys. A forwarded key the configuration does not determine leaves qualification
+incomplete until it is pinned in `upstream_expect`.
 Assistant messages, `reasoning` and `reasoning_details` included, are replayed exactly. Cost uses configured prices,
 with OpenRouter's own charge (`usage.cost`) recorded beside it. Alibaba requests cannot be cancelled through
 OpenRouter, so a timed-out request still runs and bills.

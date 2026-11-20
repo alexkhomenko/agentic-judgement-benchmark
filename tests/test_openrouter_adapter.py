@@ -364,6 +364,9 @@ def strip_reasoning(body: dict[str, Any]) -> dict[str, Any]:
 @pytest.mark.parametrize(("echo", "config", "expected"), [
     (lambda b: {**default_echo(b), "temperature": 0.7}, CONFIG, "temperature omitted in configuration"),
     (lambda b: {**default_echo(b), "max_tokens": 65536}, CONFIG, "max_tokens forwarded as 65536"),
+    (lambda b: {k: v for k, v in default_echo(b).items() if k != "max_tokens"}, CONFIG, "no output cap forwarded"),
+    (lambda b: {**default_echo(b), "max_completion_tokens": 131072}, CONFIG,
+     "max_completion_tokens forwarded as 131072"),
     (lambda b: {**default_echo(b), "model": "qwen4-max"}, CONFIG, "vendor model 'qwen4-max'"),
     (lambda b: {**default_echo(b), "enable_search": True}, CONFIG, "enable_search is on"),
     (strip_reasoning, CONFIG, "earlier reasoning is not forwarded"),
@@ -375,6 +378,58 @@ def test_qualification_rejects_a_forwarded_body_that_departs_from_the_configurat
     checks = {c.name: c for c in report.checks}
     assert not report.passed and checks["upstream_request"].passed is False
     assert expected in checks["upstream_request"].detail
+
+
+OMITTED_EFFORT = {"reasoning_effort": {"state": "omitted", "documented_default": "high"}}
+
+
+@pytest.mark.parametrize(("echo", "config", "expected"), [
+    # The reviewer's reproduction: effort and thinking switch both contradict the configured effort "high".
+    (lambda b: {**default_echo(b), "reasoning_effort": "low", "enable_thinking": False}, CONFIG,
+     "reasoning_effort forwarded as 'low', configuration implies 'high'"),
+    (lambda b: {**default_echo(b), "enable_thinking": False}, CONFIG,
+     "enable_thinking forwarded as False, configuration implies True"),
+    (lambda b: {k: v for k, v in default_echo(b).items() if k not in ("reasoning_effort", "enable_thinking")}, CONFIG,
+     "no reasoning control was forwarded"),
+    (lambda b: {**default_echo(b), "preserve_thinking": False}, CONFIG,
+     "preserve_thinking forwarded as False, configuration implies True"),  # its documented default
+    (lambda b: {**default_echo(b), "reasoning_effort": "low"}, configured(parameters=OMITTED_EFFORT),
+     "reasoning_effort forwarded as 'low', configuration implies 'high'"),  # omitted: the documented default
+])
+def test_qualification_rejects_forwarded_reasoning_controls_that_contradict_the_configuration(
+        echo: Any, config: ModelConfiguration, expected: str) -> None:
+    report = MockOpenRouter(echo=echo).adapter().qualify(config, REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert not report.passed and checks["upstream_request"].passed is False
+    assert expected in checks["upstream_request"].detail
+
+
+@pytest.mark.parametrize("extra", [{"thinking_budget": 12800}, {"seed": 1234}])
+def test_forwarded_values_the_configuration_does_not_determine_leave_qualification_incomplete(
+        extra: dict[str, Any]) -> None:
+    report = MockOpenRouter(echo=lambda b: {**default_echo(b), **extra}).adapter().qualify(CONFIG, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is None
+    assert "not verified" in check.detail and json.dumps(extra) in check.detail
+    pinned = configured(upstream_expect=extra)  # after checking the value against the vendor's docs
+    assert MockOpenRouter(echo=lambda b: {**default_echo(b), **extra}).adapter().qualify(pinned, REQUIREMENTS).passed
+
+
+def test_omitted_effort_qualifies_when_the_forwarded_controls_match_documented_defaults() -> None:
+    config = configured(parameters=OMITTED_EFFORT)
+    echo = lambda b: {**default_echo(b), "reasoning_effort": "high"}  # noqa: E731
+    report = MockOpenRouter(echo=echo).adapter().qualify(config, REQUIREMENTS)
+    assert report.passed, report.checks
+
+
+def test_the_output_cap_may_be_forwarded_under_max_completion_tokens() -> None:
+    def renamed(body: dict[str, Any]) -> dict[str, Any]:
+        echo = default_echo(body)
+        echo["max_completion_tokens"] = echo.pop("max_tokens")
+        return echo
+
+    report = MockOpenRouter(echo=renamed).adapter().qualify(CONFIG, REQUIREMENTS)
+    assert report.passed, report.checks
 
 
 def test_qualification_without_an_echo_is_not_evaluated() -> None:
