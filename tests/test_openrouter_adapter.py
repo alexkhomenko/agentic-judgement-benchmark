@@ -479,6 +479,29 @@ def test_other_hidden_values_leave_qualification_incomplete() -> None:
     report = MockOpenRouter(echo=echo).adapter().qualify(CONFIG, REQUIREMENTS)
     check = next(c for c in report.checks if c.name == "upstream_request")
     assert not report.passed and check.passed is None and "preserve_thinking" in check.detail
+    # A pin cannot verify a hidden value: one equal to some real setting leaves it unverified...
+    report = MockOpenRouter(echo=echo).adapter().qualify(configured(upstream_expect={"preserve_thinking": True}),
+                                                          REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is None and "preserve_thinking" in check.detail
+
+
+def test_pinning_the_echo_placeholder_does_not_verify_it() -> None:
+    # The reviewer's reproduction: echo and pin both carry the placeholder.
+    echo = lambda b: {**default_echo(b), "preserve_thinking": HIDDEN}  # noqa: E731
+    report = MockOpenRouter(echo=echo).adapter().qualify(configured(upstream_expect={"preserve_thinking": HIDDEN}),
+                                                          REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is False
+    assert "upstream_expect preserve_thinking pins an echo placeholder" in check.detail
+
+
+def test_a_pinned_hidden_enable_thinking_is_still_checked_by_behaviour() -> None:
+    pinned = configured(upstream_expect={"enable_thinking": True})
+    report = MockOpenRouter(thought=None).adapter().qualify(pinned, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is False and "returned no reasoning" in check.detail
+    assert MockOpenRouter().adapter().qualify(pinned, REQUIREMENTS).passed
 
 
 def test_effort_none_may_be_carried_by_the_thinking_switch_alone() -> None:

@@ -31,6 +31,8 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
   "none", so an effort reduced to the thinking switch fails. Any forwarded key the configuration does
   not determine (e.g. a thinking_budget OpenRouter derived from the effort) leaves the check NOT EVALUATED, so
   qualification cannot pass, until it is checked against the vendor's docs and pinned in `upstream_expect`.
+  A value the echo hides (e.g. "<included to upstream but not in debug info>") stays unverified whatever is
+  pinned, and pinning the placeholder itself fails; only a hidden enable_thinking is checked, by behaviour.
   The echo is recorded in the probes.
 - Cancellation is not supported for Alibaba: an abandoned request runs, and is billed, to completion.
 - Refusals: OpenRouter moderation (HTTP 403 with flagged metadata), a vendor content block (Alibaba's
@@ -604,12 +606,17 @@ def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provide
         problems.append(replay)
     expect = config.adapter_options.get("upstream_expect") or {}
     expect = expect if isinstance(expect, dict) else {}
+    # A hidden echo value proves nothing about what was forwarded, so no pin can verify it: such keys stay
+    # unverified (enable_thinking alone is checked by behaviour in _thinking_check).
+    hidden = {key for key, value in echo.items() if _hidden(value)}
     for key, value in expect.items():
-        if echo.get(key) != value:
+        if _hidden(value):
+            problems.append(f"upstream_expect {key} pins an echo placeholder ({value!r}), not a forwarded value")
+        elif key not in hidden and echo.get(key) != value:
             problems.append(f"upstream_expect {key}={value!r}, forwarded {echo.get(key)!r}")
     explained, reasoning_problems, notes = _thinking_check(config, echo, expect, bool(_reasoning_text(returned)))
     problems.extend(reasoning_problems)
-    explained |= NEUTRAL_KEYS | set(OUTPUT_LIMIT_KEYS) | set(SAMPLING) | set(expect)
+    explained |= NEUTRAL_KEYS | set(OUTPUT_LIMIT_KEYS) | set(SAMPLING) | (set(expect) - hidden)
     if echo.get("enable_search") is False:
         explained.add("enable_search")
     return problems, sorted(set(echo) - explained), notes
@@ -626,7 +633,7 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
     problems: list[str] = []
     notes: list[str] = []
     for key in THINKING_KEYS:
-        if key not in echo or key in expect:
+        if key not in echo or (key in expect and not _hidden(echo[key])):
             continue
         value = echo[key]
         setting = config.parameters.get(key)
@@ -639,7 +646,7 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
             wanted = setting.documented_default
         else:
             continue  # nothing in the configuration determines it: left unverified
-        if isinstance(value, str) and HIDDEN_VALUE.match(value):
+        if _hidden(value):
             if key != "enable_thinking" or not isinstance(wanted, bool):
                 continue  # hidden and not checkable by behaviour: left unverified
             explained.add(key)
@@ -663,6 +670,11 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
         problems.append(f"reasoning_effort {effort!r} configured but no control carrying the effort level was "
                         f"forwarded (only {forwarded}); the vendor default would set the effort")
     return explained, problems, notes
+
+
+def _hidden(value: Any) -> bool:
+    """An echo placeholder OpenRouter shows instead of a forwarded value."""
+    return isinstance(value, str) and HIDDEN_VALUE.match(value) is not None
 
 
 def _sse_chunks(text: str) -> list[dict[str, Any]]:
