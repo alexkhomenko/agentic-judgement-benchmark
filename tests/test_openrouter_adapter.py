@@ -27,7 +27,7 @@ from archbench.execution.invoke import invoke
 from archbench.execution.qualification import qualify_configuration
 from archbench.planning.compiler import compile_plan, load_experiment, persist_plan
 from archbench.planning.loader import load_scenario
-from archbench.reporting.report import publish_report
+from archbench.reporting.report import CostTally, publish_report
 from archbench.secrets import GUARD
 from archbench.storage.artifacts import ArtifactStore
 
@@ -56,6 +56,14 @@ def configured(**changes: Any) -> ModelConfiguration:
     return ModelConfiguration.model_validate(data)
 
 
+# The usage chunk OpenRouter sends just before [DONE] (shape observed live 2026-11-20): $0.0035625 at list price.
+USAGE_CHUNK = {"id": "gen-2", "object": "chat.completion.chunk", "model": "qwen/qwen4-max", "provider": "Alibaba",
+               "choices": [{"index": 0, "delta": {"content": "", "role": "assistant"}, "finish_reason": "stop",
+                            "native_finish_reason": "stop"}],
+               "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500, "cost": 0.0035625,
+                         "is_byok": False,
+                         "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                         "completion_tokens_details": {"reasoning_tokens": 300}}}
 HIDDEN = "<included to upstream but not in debug info>"  # how OpenRouter shows enable_thinking (observed live)
 
 
@@ -116,9 +124,12 @@ def default_echo(body: dict[str, Any]) -> dict[str, Any]:
 class MockOpenRouter:
     def __init__(self, *, answer: str = "1. **Qwen**: fits.", reply: httpx2.Response | Exception | None = None,
                  listing: dict[str, Any] | None = None, echo: Any = default_echo,
-                 thought: str | None = THOUGHT) -> None:
+                 thought: str | None = THOUGHT, stream_tail: list[dict[str, Any]] | None = None,
+                 stream_reply: httpx2.Response | Exception | None = None) -> None:
         self.requests: list[httpx2.Request] = []
         self.answer, self.reply, self.echo, self.thought = answer, reply, echo, thought
+        self.stream_tail = [USAGE_CHUNK] if stream_tail is None else stream_tail
+        self.stream_reply = stream_reply
         self.listing = listing or endpoints()
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
@@ -134,10 +145,15 @@ class MockOpenRouter:
         body = json.loads(request.content)
         last = body["messages"][-1]["content"]
         text = last.rsplit(" ", 1)[-1] if last.startswith("Reply with exactly one word") else self.answer
+        if body.get("stream") and self.stream_reply is not None:
+            if isinstance(self.stream_reply, Exception):
+                raise self.stream_reply
+            return self.stream_reply
         if body.get("stream"):
             chunks = [{"id": "gen-2", "provider": "Alibaba", "model": "qwen/qwen4-max", "object": "chat.completion.chunk",
                        "choices": [], "debug": {"echo_upstream_body": self.echo(body)}},
-                      {"id": "gen-2", "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]}]
+                      {"id": "gen-2", "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}]},
+                      *self.stream_tail]
             stream = ": OPENROUTER PROCESSING\n\n" + "".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
             return httpx2.Response(200, text=stream + "data: [DONE]\n\n",
                                    headers={"content-type": "text/event-stream"})
@@ -322,8 +338,18 @@ def test_qualification_checks_endpoint_and_forwarded_body() -> None:
     assert "Alibaba | qwen/qwen4-max-20261115" in checks["model_identity"].detail
     assert '"reasoning_effort": "high"' in checks["upstream_request"].detail
     assert "reasoning and reasoning_details" in checks["continuation"].detail
-    assert [p["step"] for p in report.probes] == ["endpoints", "endpoint", "upstream-baseline", "upstream-echo",
+    assert [p["step"] for p in report.probes] == ["endpoints", "upstream-baseline", "upstream-echo",
                                                   "baseline", "branch-alpha", "branch-beta"]
+    listing = report.probes[0]
+    assert listing["cost_incurred"] == "no" and listing["endpoint"]["tag"] == "alibaba"
+    streamed_probe = report.probes[2]
+    assert streamed_probe["status"] == "completed" and streamed_probe["cost_incurred"] == "yes"
+    assert streamed_probe["cost_usd"] == pytest.approx(0.0035625) and streamed_probe["openrouter_charge"] == 0.0035625
+    assert streamed_probe["usage"]["reasoning_tokens"] == 300 and streamed_probe["request_id"] == "gen-2"
+    tally = CostTally()
+    for probe in report.probes:
+        tally.add(probe.get("cost_incurred", "unknown"), probe.get("cost_usd"))
+    assert tally.unknown == 0 and tally.known > 0.0035625
     echo_probe = next(p for p in report.probes if p["step"] == "upstream-echo")
     assert echo_probe["upstream_body"]["model"] == "qwen4-max"
     assert "enable_thinking is hidden in the echo; the baseline returned reasoning" in checks["upstream_request"].detail
@@ -527,6 +553,23 @@ def test_the_output_cap_may_be_forwarded_under_max_completion_tokens() -> None:
 
     report = MockOpenRouter(echo=renamed).adapter().qualify(CONFIG, REQUIREMENTS)
     assert report.passed, report.checks
+
+
+@pytest.mark.parametrize(("mock", "status", "cost", "kind"), [
+    (MockOpenRouter(stream_tail=[]), "completed", "unknown", None),  # no usage chunk: billed, amount unknown
+    (MockOpenRouter(stream_tail=[{"id": "gen-2", "provider": "Alibaba", "error": {"code": 502, "message": "Upstream"},
+                                  "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}]},
+                                 USAGE_CHUNK]), "failed", "yes", "transient_transport"),
+    (MockOpenRouter(stream_reply=err(502, "Provider returned error")), "failed", "no", "transient_transport"),
+    (MockOpenRouter(stream_reply=err(408, "Request timed out")), "failed", "unknown", "ambiguous_timeout"),
+    (MockOpenRouter(stream_reply=httpx2.ReadTimeout("read timed out")), "failed", "unknown", "transient_transport"),
+])
+def test_the_streamed_probe_is_always_accounted(mock: MockOpenRouter, status: str, cost: str,
+                                               kind: str | None) -> None:
+    report = mock.adapter().qualify(CONFIG, REQUIREMENTS)
+    probe = next(p for p in report.probes if p["step"] == "upstream-echo")
+    assert (probe["status"], probe["cost_incurred"], probe["failure_kind"]) == (status, cost, kind)
+    assert (probe["cost_usd"] is not None) == (cost == "yes")
 
 
 def test_qualification_without_an_echo_is_not_evaluated() -> None:

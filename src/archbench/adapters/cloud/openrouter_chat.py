@@ -197,7 +197,10 @@ class OpenRouterAdapter:
         except (AdapterError, httpx2.HTTPError) as exc:
             return QualificationCheck(name="model_identity", passed=None, detail=f"not evaluated: {exc}"), None
         finally:
-            probes.append({"step": "endpoints", "wire": wire_record(transport.exchanges)})
+            # A free metadata read: recorded as a call that incurs no cost, so reports do not count it as unknown.
+            listing: dict[str, Any] = {"step": "endpoints", "status": None, "cost_incurred": CostIncurred.NO.value,
+                                       "cost_usd": None, "wire": wire_record(transport.exchanges)}
+            probes.append(listing)
         if response.status_code != 200:
             return QualificationCheck(name="model_identity", passed=False,
                                       detail=f"HTTP {response.status_code}: {_error_message(response)}"), None
@@ -212,7 +215,7 @@ class OpenRouterAdapter:
             detail = f"expected exactly one {route.name} endpoint for {config.model}, found {len(ours)} in {names}"
             return QualificationCheck(name="model_identity", passed=False, detail=detail), None
         endpoint = ours[0]
-        probes.append({"step": "endpoint", "endpoint": endpoint})
+        listing.update(status="completed", endpoint=endpoint)
         served = str(endpoint.get("name") or "").split("|")[-1].strip().rsplit("/", 1)[-1]
         if served != endpoint_model:
             problems.append(f"endpoint {endpoint.get('name')!r} serves {served!r}, not endpoint_model "
@@ -285,15 +288,26 @@ class OpenRouterAdapter:
         try:
             with self._client(config, transport) as client:
                 response = client.post(CHAT_PATH, content=json.dumps(body))
-        except (AdapterError, httpx2.HTTPError) as exc:
+        except AdapterError as exc:  # no key: nothing was sent
+            record.update(status="failed", failure_kind=FailureKind.PROVIDER_ERROR.value,
+                          cost_incurred=CostIncurred.NO.value, cost_usd=None)
+            return QualificationCheck(name="upstream_request", passed=None, detail=f"not evaluated: {exc}")
+        except httpx2.HTTPError as exc:  # Alibaba requests cannot be cancelled: a sent request may still bill
+            sent = isinstance(exc, httpx2.TimeoutException) or bool(transport.exchanges)
+            record.update(status="failed", failure_kind=FailureKind.TRANSIENT_TRANSPORT.value,
+                          cost_incurred=(CostIncurred.UNKNOWN if sent else CostIncurred.NO).value, cost_usd=None)
             return QualificationCheck(name="upstream_request", passed=None, detail=f"not evaluated: {exc}")
         finally:
             record["wire"] = wire_record(transport.exchanges)
             probes.append(record)
         if response.status_code != 200:
+            kind, cost = _status_failure(response.status_code, _error(response))
+            record.update(status="failed", failure_kind=kind.value, cost_incurred=cost.value, cost_usd=None,
+                          request_id=response.headers.get("x-generation-id"))
             return QualificationCheck(name="upstream_request", passed=False,
                                       detail=f"echo probe: HTTP {response.status_code}: {_error_message(response)}")
         chunks = _sse_chunks(response.text)
+        record.update(_stream_accounting(config, chunks, response.headers.get("x-generation-id")))
         debug = next((c for c in chunks if isinstance(c.get("debug"), dict)), None)
         echo = (debug or {}).get("debug", {}).get("echo_upstream_body")
         if not isinstance(echo, dict):
@@ -675,6 +689,36 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
 def _hidden(value: Any) -> bool:
     """An echo placeholder OpenRouter shows instead of a forwarded value."""
     return isinstance(value, str) and HIDDEN_VALUE.match(value) is not None
+
+
+def _stream_accounting(config: ModelConfiguration, chunks: list[dict[str, Any]], request_id: str | None
+                       ) -> dict[str, Any]:
+    """Probe accounting for a streamed response, from the usage chunk OpenRouter always sends just before [DONE].
+    Without one the cost is unknown: the request reached the provider and Alibaba requests run to completion."""
+    usage = next((c["usage"] for c in reversed(chunks) if isinstance(c.get("usage"), dict)), None)
+    errors = [c["error"] for c in chunks if isinstance(c.get("error"), dict)]
+    finishes = [ch.get("finish_reason") for c in chunks for ch in c.get("choices") or [] if isinstance(ch, dict)]
+    failed_stream = bool(errors) or "error" in finishes
+    fields: dict[str, Any] = {
+        "request_id": request_id or next((c.get("id") for c in chunks if c.get("id")), None),
+        "status": "failed" if failed_stream else "completed",
+        "failure_kind": None,
+    }
+    if failed_stream:
+        code = errors[0].get("code") if errors and isinstance(errors[0].get("code"), int) else 502
+        fields["failure_kind"] = _status_failure(code, errors[0] if errors else {})[0].value
+        fields["error"] = errors[0] if errors else {"type": "finish_reason", "reason": "error"}
+    if usage is None:
+        return {**fields, "cost_incurred": CostIncurred.UNKNOWN.value, "cost_usd": None,
+                "cost_missing_reason": "the stream carried no usage chunk"}
+    observations = _observations(config, usage)
+    return {
+        **fields,
+        "cost_incurred": CostIncurred.YES.value,
+        "cost_usd": observations["api_cost_usd"].value,
+        "openrouter_charge": observations["openrouter_charge"].value,
+        "usage": {name: obs.value for name, obs in observations.items() if obs.unit == "tokens"},
+    }
 
 
 def _sse_chunks(text: str) -> list[dict[str, Any]]:
