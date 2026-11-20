@@ -19,6 +19,7 @@ from .cloud.meta_responses import MetaAdapter
 from .cloud.minimax_messages import MiniMaxAdapter
 from .cloud.mistral_chat import MistralAdapter
 from .cloud.openai_responses import OpenAIAdapter
+from .cloud.openrouter_chat import OpenRouterAdapter
 from .cloud.typesafe_jev import TypeSafeAdapter
 from .cloud.xai_responses import XAIAdapter
 from .fake import FakeAdapter
@@ -91,6 +92,10 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
     microsoft_key = secrets.api_key("microsoft") or os.environ.get("AZURE_INFERENCE_CREDENTIAL") or None
     if microsoft_key:
         GUARD.register(microsoft_key)
+    # OpenRouter key, used only for vendor-pinned routes (see openrouter_chat.ROUTES); no SDK reads it automatically.
+    openrouter_key = secrets.api_key("openrouter") or os.environ.get("OPENROUTER_API_KEY") or None
+    if openrouter_key:
+        GUARD.register(openrouter_key)
     return AdapterRegistry({
         "fake": FakeAdapter(),
         "fake-judge": FakeJudgeAdapter(),
@@ -107,6 +112,7 @@ def default_registry(secrets: LocalSecrets | None = None) -> AdapterRegistry:
         "minimax": MiniMaxAdapter(api_key=minimax_key),
         "cohere": CohereAdapter(api_key=cohere_key),
         "bedrock": BedrockAdapter(api_key=bedrock_key),
+        "openrouter": OpenRouterAdapter(api_key=openrouter_key),
         "ollama": OllamaAdapter(),
         "mlx-lm": MlxLmAdapter(),
         "typesafe": TypeSafeAdapter(api_key=typesafe_key),

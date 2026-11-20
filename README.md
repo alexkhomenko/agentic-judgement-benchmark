@@ -9,7 +9,7 @@ blind, and publishes versioned reports.
 | Step (architecture.md) | State |
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
-| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Amazon Bedrock Converse adapter (Amazon Nova models only) done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. Microsoft MAI chat-completions adapter (your own Foundry deployment) qualified live with MAI-Thinking-1. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
+| 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Amazon Bedrock Converse adapter (Amazon Nova models only) done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. Microsoft MAI chat-completions adapter (your own Foundry deployment) qualified live with MAI-Thinking-1. OpenRouter adapter (Qwen4-Max pinned to Alibaba's own endpoint) done and tested offline. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
 | 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
@@ -91,6 +91,19 @@ Microsoft publishes no cached-input price and responses usually report a few cac
 unknown, with the full-input-rate upper bound recorded as `api_cost_usd_if_uncached`. Microsoft's docs list a default
 quota tier of 0 tokens per minute (every call is a 429) until a higher tier is granted.
 
+The OpenRouter adapter (`adapter: openrouter`) reaches a vendor's model through OpenRouter when the vendor's own API
+is unavailable, and only on the vendor's own serving infrastructure: `provider` stays the vendor (so the bias report
+attributes results to it) and must be one of the routes in `openrouter_chat.ROUTES` (today `alibaba`, for Qwen).
+Every request is pinned with `provider: {only: [alibaba], allow_fallbacks: false, require_parameters: true}`, never
+uses model fallbacks or variants, and opts into routing metadata; a response whose metadata does not name Alibaba,
+or that names another model, is a failure. Qualification reads the model's OpenRouter endpoints (exactly one Alibaba
+endpoint, serving `upstream_model`, with the configured prices) and streams one follow-up with
+`debug.echo_upstream_body` to check what OpenRouter actually forwards to Alibaba: the vendor model id, no injected
+sampling defaults, unchanged `max_tokens`, search off, replayed reasoning present, and any `upstream_expect` keys.
+Assistant messages, `reasoning` and `reasoning_details` included, are replayed exactly. Cost uses configured prices,
+with OpenRouter's own charge (`usage.cost`) recorded beside it. Alibaba requests cannot be cancelled through
+OpenRouter, so a timed-out request still runs and bills.
+
 The local Ollama adapter treats the Ollama server as the inference worker. It pins the checkpoint by
 digest and the engine by version and checks the digest before every call, because tags are mutable. It
 requires an explicit `num_ctx` and records a call that exceeds it as `context_exceeded`, since the MLX
@@ -160,7 +173,7 @@ string is rejected rather than written. Use `--secrets PATH` for a file elsewher
 SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `GOOGLE_API_KEY` or
 `GEMINI_API_KEY` for Gemini; `MISTRAL_API_KEY`; `XAI_API_KEY`; `DEEPSEEK_API_KEY`; `MOONSHOT_API_KEY` for Kimi;
 `ZAI_API_KEY` for GLM; `MINIMAX_API_KEY` for MiniMax; `CO_API_KEY` for Cohere; `AWS_BEARER_TOKEN_BEDROCK` for Bedrock;
-`MODEL_API_KEY` for Meta; `AZURE_INFERENCE_CREDENTIAL` for Microsoft MAI).
+`MODEL_API_KEY` for Meta; `AZURE_INFERENCE_CREDENTIAL` for Microsoft MAI; `OPENROUTER_API_KEY` for OpenRouter).
 
 ## Live debugging run
 
