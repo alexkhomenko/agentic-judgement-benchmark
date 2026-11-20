@@ -406,6 +406,11 @@ def test_qualification_rejects_a_forwarded_body_that_departs_from_the_configurat
 
 
 OMITTED_EFFORT = {"reasoning_effort": {"state": "omitted", "documented_default": "high"}}
+LOW_EFFORT = {"reasoning_effort": {"state": "explicit", "value": "low"}}
+
+
+def without_effort(body: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in default_echo(body).items() if k != "reasoning_effort"}
 
 
 @pytest.mark.parametrize(("echo", "config", "expected"), [
@@ -415,7 +420,12 @@ OMITTED_EFFORT = {"reasoning_effort": {"state": "omitted", "documented_default":
     (lambda b: {**default_echo(b), "enable_thinking": False}, CONFIG,
      "enable_thinking forwarded as False, configuration implies True"),
     (lambda b: {k: v for k, v in default_echo(b).items() if k not in ("reasoning_effort", "enable_thinking")}, CONFIG,
-     "no reasoning control was forwarded"),
+     "no control carrying the effort level was forwarded (only [])"),
+    # The reviewer's reproduction: effort "low" dropped, only the thinking switch survives.
+    (lambda b: {**without_effort(b), "enable_thinking": True}, configured(parameters=LOW_EFFORT),
+     "reasoning_effort 'low' configured but no control carrying the effort level was forwarded "
+     "(only ['enable_thinking'])"),
+    (without_effort, CONFIG, "(only ['enable_thinking'])"),  # hidden switch, effort "high" dropped
     (lambda b: {**default_echo(b), "preserve_thinking": False}, CONFIG,
      "preserve_thinking forwarded as False, configuration implies True"),  # its documented default
     (lambda b: {**default_echo(b), "reasoning_effort": "low"}, configured(parameters=OMITTED_EFFORT),
@@ -469,6 +479,21 @@ def test_other_hidden_values_leave_qualification_incomplete() -> None:
     report = MockOpenRouter(echo=echo).adapter().qualify(CONFIG, REQUIREMENTS)
     check = next(c for c in report.checks if c.name == "upstream_request")
     assert not report.passed and check.passed is None and "preserve_thinking" in check.detail
+
+
+def test_effort_none_may_be_carried_by_the_thinking_switch_alone() -> None:
+    config = configured(parameters={"reasoning_effort": {"state": "explicit", "value": "none"}})
+    echo = lambda b: {**without_effort(b), "enable_thinking": False}  # noqa: E731
+    report = MockOpenRouter(echo=echo, thought=None).adapter().qualify(config, REQUIREMENTS)
+    assert report.passed, report.checks
+
+
+def test_a_thinking_budget_carries_the_effort_once_pinned() -> None:
+    echo = lambda b: {**without_effort(b), "thinking_budget": 12800}  # noqa: E731
+    report = MockOpenRouter(echo=echo).adapter().qualify(CONFIG, REQUIREMENTS)
+    assert next(c for c in report.checks if c.name == "upstream_request").passed is None  # unverified, not failed
+    pinned = configured(upstream_expect={"thinking_budget": 12800})
+    assert MockOpenRouter(echo=echo).adapter().qualify(pinned, REQUIREMENTS).passed
 
 
 def test_the_output_cap_may_be_forwarded_under_max_completion_tokens() -> None:

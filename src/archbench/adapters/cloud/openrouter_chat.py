@@ -24,9 +24,11 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
   forwarded: the vendor model id must be `adapter_options.upstream_model`; parameters the configuration omits must
   not be injected; an output cap (`max_tokens` or `max_completion_tokens`) must be present and unchanged; the
   replayed answer and reasoning must be forwarded with the baseline's exact text; `enable_search` must not be
-  on; and every key in `adapter_options.upstream_expect` must match. Reasoning controls (enable_thinking, reasoning_effort, thinking_budget, preserve_thinking) must
-  follow from the configuration: the configured effort, else an omitted parameter's documented default; a
-  configured effort that reaches the vendor as no control at all fails. Any forwarded key the configuration does
+  on; and every key in `adapter_options.upstream_expect` must match. Reasoning controls (enable_thinking,
+  reasoning_effort, thinking_budget, preserve_thinking) must follow from the configuration: the configured effort,
+  else an omitted parameter's documented default. A configured effort must reach the vendor as a control that
+  carries its level (reasoning_effort, or a pinned thinking_budget); enable_thinking alone carries only effort
+  "none", so an effort reduced to the thinking switch fails. Any forwarded key the configuration does
   not determine (e.g. a thinking_budget OpenRouter derived from the effort) leaves the check NOT EVALUATED, so
   qualification cannot pass, until it is checked against the vendor's docs and pinned in `upstream_expect`.
   The echo is recorded in the probes.
@@ -652,8 +654,14 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
         explained.add(key)
         if value != wanted:
             problems.append(f"{key} forwarded as {value!r}, configuration implies {wanted!r}")
-    if effort is not None and not any(k in echo for k in ("enable_thinking", "reasoning_effort", "thinking_budget")):
-        problems.append(f"reasoning_effort {effort!r} configured but no reasoning control was forwarded")
+    # The effort level itself must survive translation. enable_thinking only says whether the model thinks, not how
+    # much, so it carries a configured effort only when that effort is "none". A thinking_budget carries a level
+    # but stays unverified until pinned in upstream_expect.
+    carriers = ("reasoning_effort", "thinking_budget") + (("enable_thinking",) if effort == "none" else ())
+    if effort is not None and not any(k in echo for k in carriers):
+        forwarded = [k for k in THINKING_KEYS if k in echo]
+        problems.append(f"reasoning_effort {effort!r} configured but no control carrying the effort level was "
+                        f"forwarded (only {forwarded}); the vendor default would set the effort")
     return explained, problems, notes
 
 
