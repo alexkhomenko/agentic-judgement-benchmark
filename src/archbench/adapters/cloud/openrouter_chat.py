@@ -22,9 +22,9 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
 - UPSTREAM CHECK: OpenRouter translates the request into the vendor's format. Qualification sends one streamed
   follow-up with `debug.echo_upstream_body` (streaming only, best-effort redacted) and checks the body OpenRouter
   forwarded: the vendor model id must be `adapter_options.upstream_model`; parameters the configuration omits must
-  not be injected; an output cap (`max_tokens` or `max_completion_tokens`) must be present and unchanged; replayed
-  reasoning must be forwarded; `enable_search` must not be on; and every key in `adapter_options.upstream_expect`
-  must match. Reasoning controls (enable_thinking, reasoning_effort, thinking_budget, preserve_thinking) must
+  not be injected; an output cap (`max_tokens` or `max_completion_tokens`) must be present and unchanged; the
+  replayed answer and reasoning must be forwarded with the baseline's exact text; `enable_search` must not be
+  on; and every key in `adapter_options.upstream_expect` must match. Reasoning controls (enable_thinking, reasoning_effort, thinking_budget, preserve_thinking) must
   follow from the configuration: the configured effort, else an omitted parameter's documented default; a
   configured effort that reaches the vendor as no control at all fails. Any forwarded key the configuration does
   not determine (e.g. a thinking_budget OpenRouter derived from the effort) leaves the check NOT EVALUATED, so
@@ -44,7 +44,9 @@ Configuration parameters (all others are rejected at qualification):
     reasoning_effort   explicit or omitted  -> reasoning.effort
     temperature, top_p, top_k, presence_penalty   explicit or omitted -> same names
 adapter_options:
-    upstream_model: the vendor's model id OpenRouter forwards (required; from the endpoint name)
+    endpoint_model: OpenRouter's endpoint label, e.g. qwen4-max-20261115 (required; listing name, routing metadata)
+    upstream_model: the vendor's model id OpenRouter forwards, from the debug echo (required; may differ from the
+                    label: Qwen4-Max is forwarded as the moving `qwen4-max` alias)
     upstream_expect: {key: value} that must appear in the forwarded body (optional)
     timeout_s: 900 (default)
     pricing: {input_usd_per_mtok, cached_input_usd_per_mtok, cache_write_usd_per_mtok, output_usd_per_mtok,
@@ -107,6 +109,9 @@ NEUTRAL_KEYS = frozenset({"model", "messages", "stream", "stream_options"})
 REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")  # where a vendor body may carry earlier reasoning
 UPSTREAM_REPORTED = ("model", "max_tokens", "max_completion_tokens", "enable_thinking", "reasoning_effort",
                      "thinking_budget", "preserve_thinking", "enable_search", *SAMPLING, "stream")
+# OpenRouter replaces some forwarded values in the debug echo, e.g. "<included to upstream but not in debug info>"
+# for enable_thinking (observed 2026-11-20).
+HIDDEN_VALUE = re.compile(r"(?i)^<.*(not in debug info|redacted).*>$")
 CONTEXT_OVERFLOW = re.compile(r"(?i)context.?(length|window)|maximum context|too (long|many tokens)|range of input")
 VENDOR_BLOCK = re.compile(r"(?i)data_inspection_failed|inappropriate content")
 TransportFactory = Callable[[], httpx2.BaseTransport]
@@ -172,12 +177,13 @@ class OpenRouterAdapter:
         """The model's OpenRouter endpoints: exactly one from the vendor, serving `upstream_model`, with enough
         context and output, every sent parameter supported, and the configured prices."""
         route = ROUTES.get(config.provider)
-        upstream = config.adapter_options.get("upstream_model")
+        endpoint_model = config.adapter_options.get("endpoint_model")
         if route is None or ":" in config.model:
             return QualificationCheck(name="model_identity", passed=False, detail="no allowed route"), None
-        if not isinstance(upstream, str) or not upstream:
-            return QualificationCheck(name="model_identity", passed=False,
-                                      detail="adapter_options.upstream_model is required"), None
+        for option in ("endpoint_model", "upstream_model"):
+            if not isinstance(config.adapter_options.get(option), str) or not config.adapter_options.get(option):
+                return QualificationCheck(name="model_identity", passed=False,
+                                          detail=f"adapter_options.{option} is required"), None
         if config.context_limit is None:
             return QualificationCheck(name="model_identity", passed=False, detail="context_limit is required"), None
         transport = CapturingTransport(self._transport_factory())
@@ -204,8 +210,9 @@ class OpenRouterAdapter:
         endpoint = ours[0]
         probes.append({"step": "endpoint", "endpoint": endpoint})
         served = str(endpoint.get("name") or "").split("|")[-1].strip().rsplit("/", 1)[-1]
-        if served != upstream:
-            problems.append(f"endpoint {endpoint.get('name')!r} serves {served!r}, not upstream_model {upstream!r}")
+        if served != endpoint_model:
+            problems.append(f"endpoint {endpoint.get('name')!r} serves {served!r}, not endpoint_model "
+                            f"{endpoint_model!r}")
         if endpoint.get("provider_name") != route.name:
             problems.append(f"endpoint provider is {endpoint.get('provider_name')!r}, not {route.name!r}")
         context, output_cap = endpoint.get("context_length"), endpoint.get("max_completion_tokens")
@@ -290,8 +297,7 @@ class OpenRouterAdapter:
                                       detail="not evaluated: the stream carried no debug.echo_upstream_body chunk")
         record.update(upstream_provider=(debug or {}).get("provider"), upstream_body=echo)
         returned = _choice(execution.native_response or {}).get("message") or {}
-        problems, unverified = _upstream_problems(config, echo, (debug or {}).get("provider"),
-                                                  bool(_reasoning_text(returned)))
+        problems, unverified, notes = _upstream_problems(config, echo, (debug or {}).get("provider"), returned)
         reported = {k: echo[k] for k in UPSTREAM_REPORTED if k in echo}
         detail = (f"forwarded to {(debug or {}).get('provider')}: {json.dumps(reported, sort_keys=True)}; "
                   f"top-level keys {sorted(echo)}")
@@ -304,8 +310,10 @@ class OpenRouterAdapter:
             pins = json.dumps({k: echo[k] for k in unverified}, sort_keys=True)
             return QualificationCheck(name="upstream_request", passed=None,
                                       detail=f"not verified: OpenRouter forwarded {pins}, which the configuration "
-                                             f"does not determine; pin them in upstream_expect ({detail})")
-        return QualificationCheck(name="upstream_request", passed=True, detail=detail)
+                                             f"does not determine or the echo hides; pin them in upstream_expect "
+                                             f"({detail})")
+        return QualificationCheck(name="upstream_request", passed=True,
+                                  detail="; ".join([detail, *notes]))
 
     def _continuation_check(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
         """Live probe: one baseline, then two sibling follow-ups forked from the same snapshot."""
@@ -469,6 +477,11 @@ class OpenRouterAdapter:
         if served != route.name:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "provider_mismatch", "expected": route.name,
                                                         "served": served})
+        endpoint = _served_endpoint_model(data)
+        expected_endpoint = _expected_endpoint(config)
+        if endpoint != expected_endpoint:
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "endpoint_mismatch", "expected": expected_endpoint,
+                                                        "served": endpoint})
         if not choice:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "no_choices"})
         if reason == "content_filter" or message.get("refusal"):
@@ -557,9 +570,10 @@ def _pricing_problems(config: ModelConfiguration, live: dict[str, Any]) -> list[
     return problems
 
 
-def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any, reasoned: bool
-                       ) -> tuple[list[str], list[str]]:
-    """Contradictions between the forwarded body and the configuration, and forwarded keys nothing accounts for."""
+def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any, returned: dict[str, Any]
+                       ) -> tuple[list[str], list[str], list[str]]:
+    """Contradictions between the forwarded body and the configuration, forwarded keys nothing accounts for, and
+    notes on how hidden values were verified."""
     route = ROUTES[config.provider]
     problems: list[str] = []
     if provider is not None and str(provider) != route.name:
@@ -584,30 +598,31 @@ def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provide
             problems.append(f"{key} forwarded as {value!r}, configured {budget}")
     if echo.get("enable_search"):
         problems.append("enable_search is on")
-    if reasoned:
-        assistants = [m for m in echo.get("messages") or [] if isinstance(m, dict) and m.get("role") == "assistant"]
-        if not any(m.get(k) for m in assistants for k in REASONING_KEYS):
-            problems.append("earlier reasoning is not forwarded to the vendor (it was returned and replayed)")
+    if (replay := _replay_problem(echo, returned)) is not None:
+        problems.append(replay)
     expect = config.adapter_options.get("upstream_expect") or {}
     expect = expect if isinstance(expect, dict) else {}
     for key, value in expect.items():
         if echo.get(key) != value:
             problems.append(f"upstream_expect {key}={value!r}, forwarded {echo.get(key)!r}")
-    explained, reasoning_problems = _thinking_check(config, echo, expect)
+    explained, reasoning_problems, notes = _thinking_check(config, echo, expect, bool(_reasoning_text(returned)))
     problems.extend(reasoning_problems)
     explained |= NEUTRAL_KEYS | set(OUTPUT_LIMIT_KEYS) | set(SAMPLING) | set(expect)
     if echo.get("enable_search") is False:
         explained.add("enable_search")
-    return problems, sorted(set(echo) - explained)
+    return problems, sorted(set(echo) - explained), notes
 
 
-def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: dict[str, Any]
-                    ) -> tuple[set[str], list[str]]:
+def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: dict[str, Any], reasoned: bool
+                    ) -> tuple[set[str], list[str], list[str]]:
     """The forwarded reasoning controls must follow from the configuration: the configured effort, else the
-    documented default of an omitted parameter of the same name, else a value pinned in upstream_expect."""
+    documented default of an omitted parameter of the same name, else a value pinned in upstream_expect.
+    A hidden `enable_thinking` is checked by behaviour instead: the baseline returned reasoning exactly when the
+    configuration implies thinking on. Any other hidden value stays unverified."""
     effort = explicit(config, "reasoning_effort")
     explained: set[str] = set()
     problems: list[str] = []
+    notes: list[str] = []
     for key in THINKING_KEYS:
         if key not in echo or key in expect:
             continue
@@ -622,12 +637,24 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
             wanted = setting.documented_default
         else:
             continue  # nothing in the configuration determines it: left unverified
+        if isinstance(value, str) and HIDDEN_VALUE.match(value):
+            if key != "enable_thinking" or not isinstance(wanted, bool):
+                continue  # hidden and not checkable by behaviour: left unverified
+            explained.add(key)
+            if reasoned != wanted:
+                problems.append(f"enable_thinking is hidden in the echo and the baseline "
+                                f"{'returned' if reasoned else 'returned no'} reasoning; configuration implies "
+                                f"{wanted!r}")
+            else:
+                notes.append(f"enable_thinking is hidden in the echo; the baseline "
+                             f"{'returned' if reasoned else 'returned no'} reasoning, consistent with {wanted!r}")
+            continue
         explained.add(key)
         if value != wanted:
             problems.append(f"{key} forwarded as {value!r}, configuration implies {wanted!r}")
     if effort is not None and not any(k in echo for k in ("enable_thinking", "reasoning_effort", "thinking_budget")):
         problems.append(f"reasoning_effort {effort!r} configured but no reasoning control was forwarded")
-    return explained, problems
+    return explained, problems, notes
 
 
 def _sse_chunks(text: str) -> list[dict[str, Any]]:
@@ -648,6 +675,18 @@ def _sse_chunks(text: str) -> list[dict[str, Any]]:
     return chunks
 
 
+def _expected_endpoint(config: ModelConfiguration) -> str:
+    """OpenRouter's label for the endpoint, as routing metadata reports it (e.g. qwen/qwen4-max-20261115)."""
+    return f"{config.model.split('/', 1)[0]}/{config.adapter_options.get('endpoint_model')}"
+
+
+def _served_endpoint_model(data: dict[str, Any]) -> str | None:
+    meta = data.get("openrouter_metadata")
+    available = ((meta.get("endpoints") or {}).get("available") or []) if isinstance(meta, dict) else []
+    selected = [e.get("model") for e in available if isinstance(e, dict) and e.get("selected")]
+    return selected[0] if len(selected) == 1 and isinstance(selected[0], str) else None
+
+
 def _served_provider(data: dict[str, Any]) -> str | None:
     """The provider that produced this response, from routing metadata: the selected endpoint, else the last
     attempt. A top-level `provider` is accepted only when the metadata names none."""
@@ -663,6 +702,45 @@ def _served_provider(data: dict[str, Any]) -> str | None:
             return last
     provider = data.get("provider")
     return provider if isinstance(provider, str) else None
+
+
+def _replay_problem(echo: dict[str, Any], returned: dict[str, Any]) -> str | None:
+    """The baseline's assistant turn must reach the vendor faithfully: the same answer and, when the baseline
+    reasoned, the same reasoning text (as `message.reasoning` or the joined `reasoning_details`), not merely some
+    reasoning. Only leading and trailing whitespace is ignored."""
+    assistants = [m for m in echo.get("messages") or [] if isinstance(m, dict) and m.get("role") == "assistant"]
+    if len(assistants) != 1:
+        return f"expected the one replayed assistant message to be forwarded, found {len(assistants)}"
+    forwarded = assistants[0]
+    answer = str(returned.get("content") or "").strip()
+    if (_flat_text(forwarded.get("content")) or "").strip() != answer:
+        return f"replayed answer forwarded as {_preview(forwarded.get('content'))}, baseline {_preview(answer)}"
+    baseline = {t.strip() for t in (returned.get("reasoning"), _reasoning_text(returned)) if isinstance(t, str) and t}
+    sent = {k: _flat_text(forwarded.get(k)) for k in REASONING_KEYS if forwarded.get(k)}
+    if not baseline:
+        return f"reasoning forwarded under {sorted(sent)} although the baseline returned none" if sent else None
+    if not sent:
+        return "earlier reasoning is not forwarded to the vendor (it was returned and replayed)"
+    if not any(isinstance(t, str) and t.strip() in baseline for t in sent.values()):
+        key, text = next(iter(sent.items()))
+        return (f"forwarded reasoning ({key}: {_preview(text)}) differs from the baseline's "
+                f"({_preview(next(iter(baseline)))})")
+    return None
+
+
+def _flat_text(value: Any) -> str | None:
+    """A message field as text: a string, or the text of a list of content or thinking blocks."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [b.get("text") or b.get("thinking") for b in value if isinstance(b, dict)]
+        return "".join(p for p in parts if isinstance(p, str))
+    return None
+
+
+def _preview(value: Any, limit: int = 60) -> str:
+    text = value if isinstance(value, str) else json.dumps(value)
+    return repr(text if len(text) <= limit else text[:limit] + "...")
 
 
 def _reasoning_text(message: dict[str, Any]) -> str | None:

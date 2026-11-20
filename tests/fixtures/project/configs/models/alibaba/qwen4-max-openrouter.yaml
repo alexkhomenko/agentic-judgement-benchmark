@@ -3,8 +3,10 @@
 # without a Model Studio account. `provider: alibaba` keeps vendor attribution with Alibaba in the bias report.
 # ROUTING: every request is pinned to OpenRouter's Alibaba provider (only, no fallbacks, require_parameters), and
 # each response's routing metadata must name Alibaba. OpenRouter lists Alibaba as the model's only provider.
-# SNAPSHOT: OpenRouter's endpoint is "Alibaba | qwen/qwen4-max-20261115", a dated snapshot, unlike Model Studio's
-# moving `qwen4-max` alias. Qualification checks the endpoint name and the model id actually forwarded to Alibaba.
+# MODEL ID: OpenRouter labels its endpoint "qwen/qwen4-max-20261115" (listing and per-response routing metadata),
+# but forwards Model Studio's moving `qwen4-max` alias to Alibaba (observed 2026-11-20), the same id as the native
+# config: the dated label does NOT pin the model. Both are checked: endpoint_model against the listing and every
+# response's metadata, upstream_model against the forwarded body.
 # DIFFERENCES FROM THE NATIVE CONFIG (qwen4-max.yaml), all checked or recorded at qualification:
 # - Requests go through OpenRouter's translation layer. Qualification streams one follow-up with
 #   debug.echo_upstream_body and fails if the forwarded body injects omitted sampling parameters, changes
@@ -14,6 +16,8 @@
 #   sends when `reasoning` is omitted. The forwarded reasoning_effort and enable_thinking must agree with "high",
 #   and preserve_thinking with its documented default, or qualification fails. Any other forwarded control (e.g.
 #   a thinking_budget derived from the effort) leaves qualification incomplete until pinned in upstream_expect.
+#   OpenRouter hides enable_thinking in the echo ("<included to upstream but not in debug info>", observed
+#   2026-11-20); it is checked by behaviour instead (the baseline must return reasoning).
 # - Alibaba-only switches (enable_thinking, preserve_thinking, enable_search) cannot be sent: OpenRouter does not
 #   list them, and require_parameters would refuse to route. Their native defaults are checked in the echo.
 # - Prices are OpenRouter's (5% below Model Studio Singapore). OpenRouter reports supports_implicit_caching: false,
@@ -21,9 +25,10 @@
 # - Alibaba requests cannot be cancelled through OpenRouter: a timed-out request still runs and bills.
 # Facts from openrouter.ai/docs (api reference, provider-selection, reasoning-tokens, streaming, usage-accounting,
 # parameters, errors-and-debugging, router-metadata, prompt-caching), openrouter.ai/qwen/qwen4-max and
-# /api/v1/models/qwen/qwen4-max/endpoints, read 2026-11-20. Not yet qualified live.
+# /api/v1/models/qwen/qwen4-max/endpoints, read 2026-11-20. Revision 1 failed live qualification on 2026-11-20
+# (it expected the dated id upstream and read the hidden enable_thinking as a contradiction).
 configuration_id: qwen4-max-openrouter
-revision: 1
+revision: 2
 track: cloud
 adapter: openrouter
 provider: alibaba
@@ -73,7 +78,8 @@ parameters:
     source: native_recommended uses the provider default (thinking mode); must not be injected upstream
     verified_on: 2026-11-16
 adapter_options:
-  upstream_model: qwen4-max-20261115  # from the endpoint name; must also be the model id forwarded to Alibaba
+  endpoint_model: qwen4-max-20261115  # OpenRouter's endpoint label (listing name, routing metadata)
+  upstream_model: qwen4-max  # the model id OpenRouter forwards to Alibaba (observed 2026-11-20)
   upstream_expect: {}  # pin forwarded keys the configuration does not determine, e.g. {thinking_budget: 131072}
   timeout_s: 900
   pricing:

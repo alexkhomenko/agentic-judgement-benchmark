@@ -47,7 +47,7 @@ THOUGHT = "The user wants one model. Qwen fits."
 def configured(**changes: Any) -> ModelConfiguration:
     data = CONFIG.model_dump(mode="json")
     for key, value in changes.items():
-        if key in ("upstream_model", "upstream_expect", "pricing"):
+        if key in ("upstream_model", "endpoint_model", "upstream_expect", "pricing"):
             data["adapter_options"][key] = value
         elif key == "parameters":
             data["parameters"].update(value)
@@ -56,10 +56,13 @@ def configured(**changes: Any) -> ModelConfiguration:
     return ModelConfiguration.model_validate(data)
 
 
-def metadata(provider: str = "Alibaba") -> dict[str, Any]:
+HIDDEN = "<included to upstream but not in debug info>"  # how OpenRouter shows enable_thinking (observed live)
+
+
+def metadata(provider: str = "Alibaba", endpoint: str = "qwen/qwen4-max-20261115") -> dict[str, Any]:
     return {"requested": "qwen/qwen4-max", "strategy": "direct", "summary": f"available=1, selected={provider}",
             "attempt": 1, "is_byok": False,
-            "endpoints": {"total": 1, "available": [{"provider": provider, "model": "qwen/qwen4-max",
+            "endpoints": {"total": 1, "available": [{"provider": provider, "model": endpoint,
                                                      "selected": True}]}}
 
 
@@ -105,16 +108,17 @@ def default_echo(body: dict[str, Any]) -> dict[str, Any]:
         if m.get("reasoning"):
             forwarded["reasoning_content"] = m["reasoning"]
         messages.append(forwarded)
-    return {"model": "qwen4-max-20261115", "messages": messages, "max_tokens": body["max_tokens"],
-            "enable_thinking": True, "reasoning_effort": body.get("reasoning", {}).get("effort"), "stream": True,
+    return {"model": "qwen4-max", "messages": messages, "max_tokens": body["max_tokens"],
+            "enable_thinking": HIDDEN, "reasoning_effort": body.get("reasoning", {}).get("effort"), "stream": True,
             "stream_options": {"include_usage": True}}
 
 
 class MockOpenRouter:
     def __init__(self, *, answer: str = "1. **Qwen**: fits.", reply: httpx2.Response | Exception | None = None,
-                 listing: dict[str, Any] | None = None, echo: Any = default_echo) -> None:
+                 listing: dict[str, Any] | None = None, echo: Any = default_echo,
+                 thought: str | None = THOUGHT) -> None:
         self.requests: list[httpx2.Request] = []
-        self.answer, self.reply, self.echo = answer, reply, echo
+        self.answer, self.reply, self.echo, self.thought = answer, reply, echo, thought
         self.listing = listing or endpoints()
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
@@ -137,7 +141,8 @@ class MockOpenRouter:
             stream = ": OPENROUTER PROCESSING\n\n" + "".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
             return httpx2.Response(200, text=stream + "data: [DONE]\n\n",
                                    headers={"content-type": "text/event-stream"})
-        return httpx2.Response(200, json=completion(text), headers={"x-generation-id": "gen-1795000000-abcdef"})
+        body_json = completion(text, thought=self.thought, reasoning_tokens=40 if self.thought else 0)
+        return httpx2.Response(200, json=body_json, headers={"x-generation-id": "gen-1795000000-abcdef"})
 
     def adapter(self, api_key: str | None = API_KEY) -> OpenRouterAdapter:
         return OpenRouterAdapter(api_key=api_key, transport_factory=lambda: httpx2.MockTransport(self))
@@ -190,6 +195,7 @@ def test_explicit_sampling_parameters_are_sent_under_their_own_names(tmp_path: P
 @pytest.mark.parametrize(("body", "kind", "error_type"), [
     (completion(meta=metadata("Novita")), FailureKind.PROVIDER_ERROR, "provider_mismatch"),
     (completion(meta={}), FailureKind.PROVIDER_ERROR, "provider_mismatch"),  # nobody named: unverified
+    (completion(meta=metadata(endpoint="qwen/qwen4-max-20261201")), FailureKind.PROVIDER_ERROR, "endpoint_mismatch"),
     (completion(model="qwen/qwen3-max"), FailureKind.PROVIDER_ERROR, "model_mismatch"),
     (completion(finish="content_filter"), FailureKind.REFUSAL, "content_filter"),
     (completion(finish="tool_calls"), FailureKind.PROVIDER_ERROR, "finish_reason"),
@@ -314,12 +320,13 @@ def test_qualification_checks_endpoint_and_forwarded_body() -> None:
     checks = {c.name: c for c in report.checks}
     assert report.passed, checks
     assert "Alibaba | qwen/qwen4-max-20261115" in checks["model_identity"].detail
-    assert '"enable_thinking": true' in checks["upstream_request"].detail
+    assert '"reasoning_effort": "high"' in checks["upstream_request"].detail
     assert "reasoning and reasoning_details" in checks["continuation"].detail
     assert [p["step"] for p in report.probes] == ["endpoints", "endpoint", "upstream-baseline", "upstream-echo",
                                                   "baseline", "branch-alpha", "branch-beta"]
     echo_probe = next(p for p in report.probes if p["step"] == "upstream-echo")
-    assert echo_probe["upstream_body"]["model"] == "qwen4-max-20261115"
+    assert echo_probe["upstream_body"]["model"] == "qwen4-max"
+    assert "enable_thinking is hidden in the echo; the baseline returned reasoning" in checks["upstream_request"].detail
     streamed = json.loads(mock.requests[2].content)
     assert streamed["stream"] is True and streamed["debug"] == {"echo_upstream_body": True}
     assert streamed["max_tokens"] == 16000 and streamed["messages"][2]["reasoning"] == THOUGHT
@@ -335,6 +342,7 @@ def test_qualification_checks_endpoint_and_forwarded_body() -> None:
     (endpoints(provider_name="Alibaba Cloud", tag="alibaba"), CONFIG, "not 'Alibaba'"),
     (endpoints(tag="novita"), CONFIG, "found 0"),
     (endpoints(), configured(upstream_model=""), "upstream_model is required"),
+    (endpoints(), configured(endpoint_model=""), "endpoint_model is required"),
 ])
 def test_qualification_rejects_endpoint_problems(listing: dict[str, Any], config: ModelConfiguration,
                                                  expected: str) -> None:
@@ -354,11 +362,22 @@ def test_qualification_rejects_a_second_alibaba_endpoint() -> None:
     assert checks["model_identity"].passed is False and "found 2" in checks["model_identity"].detail
 
 
-def strip_reasoning(body: dict[str, Any]) -> dict[str, Any]:
-    echo = default_echo(body)
-    for m in echo["messages"]:
-        m.pop("reasoning_content", None)
+def edit_assistant(**fields: Any) -> Any:
+    """An echo whose forwarded assistant message has `fields` replaced (None removes the field)."""
+    def echo(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = default_echo(body)
+        for m in forwarded["messages"]:
+            if m["role"] == "assistant":
+                for key, value in fields.items():
+                    if value is None:
+                        m.pop(key, None)
+                    else:
+                        m[key] = value
+        return forwarded
     return echo
+
+
+strip_reasoning = edit_assistant(reasoning_content=None)
 
 
 @pytest.mark.parametrize(("echo", "config", "expected"), [
@@ -367,9 +386,15 @@ def strip_reasoning(body: dict[str, Any]) -> dict[str, Any]:
     (lambda b: {k: v for k, v in default_echo(b).items() if k != "max_tokens"}, CONFIG, "no output cap forwarded"),
     (lambda b: {**default_echo(b), "max_completion_tokens": 131072}, CONFIG,
      "max_completion_tokens forwarded as 131072"),
-    (lambda b: {**default_echo(b), "model": "qwen4-max"}, CONFIG, "vendor model 'qwen4-max'"),
+    (lambda b: {**default_echo(b), "model": "qwen4-max-20261115"}, CONFIG, "vendor model 'qwen4-max-20261115'"),
     (lambda b: {**default_echo(b), "enable_search": True}, CONFIG, "enable_search is on"),
     (strip_reasoning, CONFIG, "earlier reasoning is not forwarded"),
+    # The reviewer's reproduction: reasoning is present but is not the baseline's.
+    (edit_assistant(reasoning_content="Something unrelated."), CONFIG, "differs from the baseline's"),
+    (edit_assistant(reasoning_content=THOUGHT[:20]), CONFIG, "differs from the baseline's"),  # truncated
+    (edit_assistant(content="different"), CONFIG, "replayed answer forwarded as 'different'"),
+    (lambda b: {**default_echo(b), "messages": [m for m in default_echo(b)["messages"] if m["role"] != "assistant"]},
+     CONFIG, "found 0"),
     (default_echo, configured(upstream_expect={"thinking_budget": 131072}), "upstream_expect thinking_budget=131072"),
 ])
 def test_qualification_rejects_a_forwarded_body_that_departs_from_the_configuration(
@@ -422,6 +447,30 @@ def test_omitted_effort_qualifies_when_the_forwarded_controls_match_documented_d
     assert report.passed, report.checks
 
 
+@pytest.mark.parametrize("forwarded", [
+    {"reasoning_content": f"  {THOUGHT}\n"},  # surrounding whitespace only
+    {"reasoning_content": None, "reasoning": [{"type": "thinking", "thinking": THOUGHT}]},  # as thinking blocks
+])
+def test_faithfully_forwarded_reasoning_qualifies_in_other_shapes(forwarded: dict[str, Any]) -> None:
+    report = MockOpenRouter(echo=edit_assistant(**forwarded)).adapter().qualify(CONFIG, REQUIREMENTS)
+    assert report.passed, report.checks
+
+
+def test_a_hidden_enable_thinking_contradicted_by_behaviour_fails() -> None:
+    # The configuration implies thinking on, the echo hides the switch, and the baseline returned no reasoning.
+    report = MockOpenRouter(thought=None).adapter().qualify(CONFIG, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is False
+    assert "enable_thinking is hidden in the echo and the baseline returned no reasoning" in check.detail
+
+
+def test_other_hidden_values_leave_qualification_incomplete() -> None:
+    echo = lambda b: {**default_echo(b), "preserve_thinking": HIDDEN}  # noqa: E731
+    report = MockOpenRouter(echo=echo).adapter().qualify(CONFIG, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is None and "preserve_thinking" in check.detail
+
+
 def test_the_output_cap_may_be_forwarded_under_max_completion_tokens() -> None:
     def renamed(body: dict[str, Any]) -> dict[str, Any]:
         echo = default_echo(body)
@@ -467,5 +516,5 @@ def test_qwen_through_openrouter_is_attributed_to_alibaba_in_a_p6_run(env: Env) 
     resume_evaluation(env.db, env.store, registry, run.record_id)
     report = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
     rows = {r["configuration"]: r for r in _read_csv(env, env.db.artifacts_for(report.record_id)["bias-summary.csv"])}
-    row = rows["qwen4-max-openrouter@1"]
+    row = rows["qwen4-max-openrouter@2"]
     assert row["own_vendor"] == "alibaba" and row["own_first.k"] == "2"
