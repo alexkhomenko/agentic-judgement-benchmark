@@ -119,13 +119,37 @@ def cmd_evaluation_status(ws: Workspace, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(ws: Workspace, args: argparse.Namespace) -> int:
+    import webbrowser
+
+    from .evaluation.review_app import ReviewApp, serve
+
+    app = ReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
+    server, url = serve(app, args.port)
+    queue = app.queue()
+    print(f"checking {queue['total']} response(s) of {args.evaluation_run_id} as {args.reviewer}: "
+          f"{queue['done']} done, {queue['total'] - queue['done']} to go")
+    print(f"open {url}  (Ctrl-C to stop; every decision is saved as you make it)")
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    queue = app.queue()
+    print(f"\nstopped: {queue['done']}/{queue['total']} checked, {queue['counts']['flagged']} flagged")
+    return 0
+
+
 def cmd_review_export(ws: Workspace, args: argparse.Namespace) -> int:
     from .evaluation.review import export_reviews
     from .evaluation.runner import load_run
 
     ctx = load_run(ws.db, args.evaluation_run_id)
     written = export_reviews(ws.db, ws.store, ctx.run, Path(args.out))
-    print(f"exported {len(written) // 2} blinded review packet(s) to {args.out}")
+    print(f"exported {len(written) // 2} flagged response(s) for full review to {args.out}")
     return 0
 
 
@@ -222,18 +246,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("evaluation_run_id")
     p.set_defaults(func=cmd_evaluation_status)
 
-    p = sub.add_parser("review-export", help="export blinded packets and templates for selected human reviews")
+    p = sub.add_parser("review", help="open the review app: check every response's judgement, approve or flag it")
+    p.add_argument("evaluation_run_id")
+    p.add_argument("--reviewer", required=True, help="your reviewer identifier, recorded on every check")
+    p.add_argument("--port", type=int, default=0, help="local port (default: any free port)")
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("review-export", help="export blinded packets and templates for flagged responses")
     p.add_argument("evaluation_run_id")
     p.add_argument("--out", required=True, help="directory for reviewer files (never overwritten)")
     p.set_defaults(func=cmd_review_export)
 
-    p = sub.add_parser("review-import", help="import completed human review files")
+    p = sub.add_parser("review-import", help="import completed full human review files")
     p.add_argument("evaluation_run_id")
     p.add_argument("files", nargs="+")
     p.add_argument("--supersede", action="store_true", help="record a correction of the reviewer's prior review")
     p.set_defaults(func=cmd_review_import)
 
-    p = sub.add_parser("adjudicate", help="append adjudication records for reviewed and agreeing responses")
+    p = sub.add_parser("adjudicate", help="append adjudication records for checked and reviewed responses")
     p.add_argument("evaluation_run_id")
     p.set_defaults(func=cmd_adjudicate)
 

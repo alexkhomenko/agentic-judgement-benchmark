@@ -1,11 +1,14 @@
-"""Human review: selection, blinded export, and validated import.
+"""Full human review: attention signals, blinded export, and validated import.
 
-Selection covers every critical-failure candidate, judge disagreement, response lacking two valid judge
-evaluations, representative high/low examples per round, and a reproducible stratified sample (by track
-and round) of at least the policy fraction of the remaining responses.
+Every response is human-checked (see `checks.py`). A full review is the escalation for a check that flags a
+judge or the answer: the reviewer re-scores the response from the blinded packet.
+
+The review selection marks responses that deserve close attention during the check: critical-failure
+candidates, judge disagreements, responses lacking a valid evaluation from every judge, high/low examples per
+round, and a reproducible stratified sample. It no longer decides which responses get human attention.
 
 Exports contain only the blinded packet and an empty structured template. They never reveal judge
-scores, selection reasons, or response identity, so human scores are recorded independently.
+scores, selection reasons, or response identity.
 """
 
 from __future__ import annotations
@@ -153,7 +156,9 @@ def review_template(packet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-REVIEW_README = """# Blinded architecture review
+REVIEW_README = """# Full review of flagged responses
+
+These are the responses a human check flagged (a judge or the answer looked wrong). Re-score each one.
 
 Each `<packet>.packet.json` holds the task, the conversation, a candidate answer, the private rubric,
 and reference properties. Provider, model, cost, timing, and judge assessments are deliberately absent.
@@ -163,8 +168,21 @@ For each packet, fill `<packet>.review.json`:
 - `ratings`: an integer 0-4 per dimension, with quoted evidence from the answer and a rationale.
 - `critical_failures`: decide every listed failure (`confirmed: true/false`); confirmed ones need evidence.
 
-Submit before seeing any judge scores. Import with `bench review-import <evaluation-run> <file>...`.
+Import with `bench review-import <evaluation-run> <file>...`.
 """
+
+
+def flagged_for_review(db: Database, run: Record) -> list[dict[str, Any]]:
+    """Responses whose current check flags a judge or the answer and that have no full review yet."""
+    from .checks import RunIndex
+    from .runner import load_run
+
+    index = RunIndex.build(db, load_run(db, run.record_id))
+    return [
+        {"response_id": str(p.subject_id), "packet_id": p.record_id, "round": int(p.payload["round"])}
+        for p in index.packets
+        if index.blocking(p.record_id) and str(p.subject_id) not in index.reviews
+    ]
 
 
 def export_reviews(db: Database, store: ArtifactStore, run: Record, out_dir: Path) -> list[Path]:
@@ -173,11 +191,7 @@ def export_reviews(db: Database, store: ArtifactStore, run: Record, out_dir: Pat
         raise RuntimeError("review selection does not exist yet; judge evaluation must finish first")
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    reviewed = {r.payload["packet_id"] for r in effective(
-        run_records(db, RecordKind.HUMAN_REVIEW, str(run.experiment_id), run.record_id))}
-    for item in selection.payload["items"]:
-        if item["packet_id"] in reviewed:
-            continue
+    for item in flagged_for_review(db, run):
         packet = read_packet(db, store, item["packet_id"])
         for path, value in (
             (out_dir / f"{item['packet_id']}.packet.json", packet),
@@ -204,11 +218,13 @@ def import_review(
     selection = db.get_record(selection_record_id(run.record_id))
     if selection is None:
         raise ReviewImportError("review selection does not exist yet")
-    item = next((i for i in selection.payload["items"] if i["packet_id"] == submission.packet_id), None)
-    if item is None:
-        raise ReviewImportError(f"packet {submission.packet_id} was not selected for review in {run.record_id}")
+    packet_record = db.get_record(submission.packet_id)
+    if (packet_record is None or packet_record.kind is not RecordKind.BLINDED_PACKET
+            or packet_record.payload.get("evaluation_run_id") != run.record_id):
+        raise ReviewImportError(f"packet {submission.packet_id} does not belong to evaluation run {run.record_id}")
+    response_id, round_number = str(packet_record.subject_id), int(packet_record.payload["round"])
 
-    expected = {d.id for d in rubric.applicable_dimensions(item["round"])}
+    expected = {d.id for d in rubric.applicable_dimensions(round_number)}
     if set(submission.ratings) != expected:
         raise ReviewImportError(f"ratings must cover exactly {sorted(expected)}")
     decided: dict[str, bool] = {}
@@ -232,7 +248,7 @@ def import_review(
         )
     confirmed = sorted(f for f, c in decided.items() if c)
     score = compute_score(
-        rubric, item["round"], {k: v.rating for k, v in submission.ratings.items()},
+        rubric, round_number, {k: v.rating for k, v in submission.ratings.items()},
         critical_failure_confirmed=bool(confirmed),
     )
     review_id = new_id("hrv")
@@ -241,7 +257,7 @@ def import_review(
     packet = db.artifacts_for(submission.packet_id)["packet.json"]
     record = Record.create(
         kind=RecordKind.HUMAN_REVIEW, record_id=review_id, experiment_id=experiment_id,
-        subject_id=item["response_id"],
+        subject_id=response_id,
         inputs={submission.packet_id: packet.sha256, selection.record_id: selection.payload_sha256},
         policy_revision=f"{run.policy_revision}/rubric@{rubric.revision}", code_revision=EVALUATION_CODE_REVISION,
         supersedes=prior[0].record_id if prior else None,

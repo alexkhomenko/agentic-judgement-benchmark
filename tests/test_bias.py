@@ -333,3 +333,37 @@ def test_model_pick_self_preference_and_open_weights(env: Env) -> None:
            {"Claude Sonnet"}
     markdown = env.store.read_verified(files["report.md"]).decode()
     assert "(+2 mixed-weights family)" in markdown
+
+
+def test_extraction_only_flag_is_reported_without_blocking_scoring(env: Env) -> None:
+    from archbench.domain.records import RecordKind
+    from archbench.evaluation.adjudication import adjudicate
+    from archbench.evaluation.checks import RunIndex, candidate_failures, record_check
+    from archbench.evaluation.records import run_records
+
+    plan = p4_experiment(env, "bias-check", [
+        recommender(env, "only", "anthropic", ["Claude Agent SDK", "LangGraph", "CrewAI"]),
+    ], repetitions=2)
+    run = start_evaluation(env.db, env.store, plan.experiment_id, bias_policy(env), base=env.base,
+                           registry=env.registry)
+    resume_evaluation(env.db, env.store, env.registry, run.record_id)
+    ctx = load_run(env.db, run.record_id)
+    packets = RunIndex.build(env.db, ctx).packets
+    for n, packet in enumerate(packets):
+        index = RunIndex.build(env.db, ctx)
+        record_check(env.db, env.store, index, {
+            "packet_id": packet.record_id, "reviewer_id": "r1",
+            "flags": ["extraction"] if n == 0 else [], "note": "missed LangGraph as primary" if n == 0 else "",
+            "critical_failures": [{"failure": f, "confirmed": False}
+                                  for f in candidate_failures(index.chosen_judges(packet.record_id))],
+        })
+    progress = adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    assert progress.pending_human_review == [] and progress.adjudicated == len(packets)
+    report = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
+    assert set(report.payload["input_manifest"]["records"]["human_check"]) == {
+        r.record_id for r in run_records(env.db, RecordKind.HUMAN_CHECK, plan.experiment_id, run.record_id)}
+    files = env.db.artifacts_for(report.record_id)
+    flags = _read_csv(env, files["human-check-flags.csv"])
+    assert len(flags) == 1 and flags[0]["flags"] == "extraction" and flags[0]["blocks_scoring"] == "False"
+    markdown = env.store.read_verified(files["report.md"]).decode()
+    assert "## Human check flags" in markdown and "missed LangGraph as primary" in markdown

@@ -10,7 +10,7 @@ blind, and publishes versioned reports.
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
 | 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Amazon Bedrock Converse adapter (Amazon Nova models only) done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. Microsoft MAI chat-completions adapter (your own Foundry deployment) qualified live with MAI-Thinking-1. OpenRouter adapter (Qwen4-Max pinned to Alibaba's own endpoint) qualified live. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
-| 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
+| 3. Evaluation path: validation, blind judges, human check of every judgement, review of flagged ones, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
 The `fake` and `fake-judge` adapters need no credentials and produce meaningless scores; they exist to
@@ -233,12 +233,33 @@ bench qualify configs/experiments/fake-smoke.yaml           # persisted qualific
 bench plan configs/experiments/fake-smoke.yaml              # freeze the experiment plan
 bench run fake-smoke-001                                    # execute or resume the branching graph
 bench evaluate fake-smoke-001 --policy configs/evaluation/default.yaml
-#   validation -> blinded packets -> two independent judges -> classification -> review selection
-bench review-export <evaluation-run> --out reviews/         # blinded packets + empty templates
+#   validation -> blinded packets -> two independent judges -> classification -> attention signals
+bench review <evaluation-run> --reviewer <you>              # check every judgement in the review app
+bench review-export <evaluation-run> --out reviews/         # flagged responses only: blinded packets + templates
 bench review-import <evaluation-run> reviews/*.review.json  # --supersede records a correction
 bench adjudicate <evaluation-run>
 bench report fake-smoke-001 --evaluation <evaluation-run>
 ```
+
+### Human checks
+
+`bench review` opens a local page (127.0.0.1 only) that walks through every response of the run. Each
+screen shows the rendered answer, with the passages the judges and the extractor cited highlighted, next to
+each judge's ratings, rationales and quotes, the critical-failure candidates, and the extraction. Candidate
+identity stays hidden, and responses are ordered by round and random packet id. The header shows how many
+responses are checked, approved, flagged and left; the sidebar lists every response with its state and marks
+the ones whose judges raised something worth a close look.
+
+- **Looks right** (`A`): the judge mean stands. Confirm or reject each critical-failure candidate first.
+- **Flag** (`F`): tick what looks wrong (a judge, the extraction, or the answer itself) and say why. A flag on
+  a judge or the answer holds the score until a full blind re-score (`review-export` / `review-import`); an
+  extraction-only flag is listed in the report (`human-check-flags.csv`) and does not block scoring.
+- `J`/`K` move between responses, `N` jumps to the next unchecked one, and `?` lists every shortcut.
+
+Every decision is saved as an append-only `human_check` record the moment it is made; changing your mind
+supersedes the earlier record. A check names the judge and extraction records it saw. If those change (for
+example a judge that was missing completes on resume), the check goes stale and the response needs another
+check. Adjudication waits until every response is checked and every blocking flag is fully reviewed.
 
 Use `bench evaluate <exp> --resume <evaluation-run>` to continue an interrupted evaluation and
 `bench evaluation-status <evaluation-run>` to see stage coverage. Results go to `results/` by default

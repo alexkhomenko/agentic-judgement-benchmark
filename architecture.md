@@ -25,7 +25,7 @@ flowchart TD
     F --> E
     E --> V[Deterministic validation]
     V --> J[Two blind judge evaluations]
-    J --> H[Independent human review and adjudication]
+    J --> H[Human check of every judgement, review of flagged ones, adjudication]
     H --> R[Versioned reports]
     E --> D
 ```
@@ -171,8 +171,8 @@ Evaluation is separately resumable and can be rerun under a new rubric without r
 1. **Validate.** Check output presence, truncation, artifact integrity, and mechanically checkable requirements. Section coverage is a review signal; correctness requires evidence and judgment.
 2. **Build blinded packets.** Include the public task, relevant baseline conversation, final answer, private rubric, and reference properties. Exclude provider, model configuration, timing, cost, and file paths that reveal identity. Preserve any narrowly applied identity masking as an auditable transformation.
 3. **Judge independently.** Prefer two different judge model families with frozen configurations. Neither sees the other's assessment. Require per-dimension ratings, cited response evidence, and critical-failure candidates. Candidate text is untrusted evaluation input and cannot modify the judge instructions or invoke tools.
-4. **Collect independent human reviews.** Export blinded review packets and import structured scores. Reviewers submit before seeing judge scores. Select all critical-failure candidates, disagreements, high/low examples, and a reproducible stratified sample of at least 20% of the remaining responses.
-5. **Adjudicate.** Preserve original judge and human records. Add a separate adjudication record documenting confirmed failures, disagreements, and the final scoring decision.
+4. **Check every judgement; fully review the flagged ones.** A reviewer reads every response (blinded to candidate identity) next to its judge assessments and recommendation extraction in the review app, and either approves it, confirming or rejecting each critical-failure candidate, or flags what looks wrong: a judge, the extraction, or the answer itself, with a note. A check names the exact judge and extraction records it saw and goes stale if they change. A flag on a judge or on the answer holds the response for a full human re-score from the blinded packet; an extraction-only flag is reported. Critical-failure candidates, disagreements, missing judges, unverified quotes, and high/low examples are shown as attention signals; they no longer limit which responses a human sees.
+5. **Adjudicate.** Preserve original judge and human records. Add a separate adjudication record documenting confirmed failures, disagreements, and the final scoring decision: the full human review where one exists, otherwise the mean of the judge evaluations an approving check accepted. Unchecked and flagged-but-unreviewed responses stay pending.
 
 Compute the rubric score in code:
 

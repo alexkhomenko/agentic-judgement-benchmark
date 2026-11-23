@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Judgement check</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --panel-2: #f0eee9; --text: #1d1c1a; --muted: #6b6862; --line: #e2dfd8;
+  --accent: #2f5fd0; --accent-soft: #e5ecfb; --ok: #1f7a4d; --ok-soft: #e2f3ea; --flag: #b4461d; --flag-soft: #fbe9e0;
+  --warn: #9a6400; --warn-soft: #fbf1db; --mark: #fff0a8; --mark-strong: #ffd43b;
+  --r0: #c0392b; --r1: #d9771a; --r2: #b99a07; --r3: #4f9a3d; --r4: #1f7a4d;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --panel: #1f1f1d; --panel-2: #282826; --text: #ecebe7; --muted: #a29f98; --line: #34332f;
+    --accent: #7ea2ff; --accent-soft: #23304d; --ok: #5ccf94; --ok-soft: #1c3328; --flag: #ff9a6e; --flag-soft: #3d241a;
+    --warn: #f0c060; --warn-soft: #3a3020; --mark: #5a4d10; --mark-strong: #8a7210;
+    --r0: #ff6b5b; --r1: #ff9f4a; --r2: #e6c84a; --r3: #8ed46f; --r4: #5ccf94;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  display: grid; grid-template-rows: auto 1fr auto; }
+button { font: inherit; color: inherit; cursor: pointer; }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; background: var(--panel); color: var(--muted); }
+
+/* header */
+header { display: flex; align-items: center; gap: 18px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header .brand { font-weight: 650; white-space: nowrap; }
+header .run { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.progress { flex: 1; min-width: 200px; }
+.progress .bar { height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; display: flex; }
+.progress .bar span { display: block; height: 100%; }
+.progress .bar .a { background: var(--ok); } .progress .bar .f { background: var(--flag); }
+.progress .label { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; gap: 14px; flex-wrap: wrap; }
+.progress .label b { color: var(--text); }
+header .help { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 3px 9px; }
+
+/* layout */
+.body { display: grid; grid-template-columns: 190px 1fr; min-height: 0; }
+nav { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 8px 6px 20px; }
+nav h4 { margin: 12px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+nav button { display: flex; width: 100%; align-items: center; gap: 8px; border: 0; background: none; text-align: left;
+  padding: 4px 8px; border-radius: 6px; }
+nav button:hover { background: var(--panel-2); }
+nav button.current { background: var(--accent-soft); font-weight: 600; }
+nav .icon { width: 16px; text-align: center; }
+nav .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-left: auto; }
+.st-approved { color: var(--ok); } .st-flagged { color: var(--flag); } .st-unchecked { color: var(--muted); } .st-stale { color: var(--warn); }
+
+main { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+.where { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+.where h1 { font-size: 17px; margin: 0; }
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2px 9px; border-radius: 999px;
+  background: var(--panel-2); color: var(--muted); }
+.chip.approved { background: var(--ok-soft); color: var(--ok); } .chip.flagged { background: var(--flag-soft); color: var(--flag); }
+.chip.stale { background: var(--warn-soft); color: var(--warn); }
+.panes { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); min-height: 0; }
+.pane { overflow-y: auto; padding: 16px 22px 40px; }
+.pane + .pane { border-left: 1px solid var(--line); background: var(--panel); }
+.pane h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; }
+.pane h2:first-child { margin-top: 0; }
+
+/* task + answer */
+details.task { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; }
+details.task summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.msg { margin-top: 8px; } .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.msg .content { white-space: pre-wrap; font-size: 13px; }
+article.md { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 22px 16px; max-width: 860px; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 18px 0 6px; line-height: 1.3; text-transform: none; letter-spacing: 0; color: var(--text); }
+.md h1 { font-size: 20px; } .md h2 { font-size: 17px; } .md h3 { font-size: 15px; } .md h4, .md h5, .md h6 { font-size: 14px; }
+.md p { margin: 8px 0; } .md ul, .md ol { margin: 6px 0; padding-left: 22px; } .md li { margin: 2px 0; }
+.md pre { background: var(--panel-2); padding: 10px 12px; border-radius: 6px; overflow-x: auto; font-size: 12.5px; }
+.md code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.md table { border-collapse: collapse; margin: 10px 0; font-size: 13px; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--line); padding: 4px 8px; vertical-align: top; }
+.md th { background: var(--panel-2); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.md .url { color: var(--muted); font-size: 12px; }
+mark.ev { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
+mark.ev.hot { background: var(--mark-strong); outline: 2px solid var(--mark-strong); }
+body.no-marks mark.ev { background: none; }
+
+/* judgement pane */
+.attention { list-style: none; padding: 0; margin: 0 0 6px; }
+.attention li { padding: 6px 10px; border-radius: 6px; margin-bottom: 5px; font-size: 13px; }
+.attention .warn { background: var(--warn-soft); color: var(--warn); } .attention .info { background: var(--panel-2); color: var(--muted); }
+.scores { width: 100%; border-collapse: collapse; font-size: 13px; }
+.scores th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.scores td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.scores tr.dim { cursor: pointer; } .scores tr.dim:hover td { background: var(--panel-2); }
+.scores tr.split td:first-child { box-shadow: inset 3px 0 var(--warn); }
+.scores .w { color: var(--muted); font-size: 11px; }
+.scores tr.total td { font-weight: 600; border-bottom: 0; }
+.pill { display: inline-block; min-width: 30px; text-align: center; font-weight: 650; border-radius: 5px; padding: 1px 6px; color: #fff; font-size: 12.5px; }
+.pill.r0 { background: var(--r0); } .pill.r1 { background: var(--r1); } .pill.r2 { background: var(--r2); } .pill.r3 { background: var(--r3); } .pill.r4 { background: var(--r4); }
+.pill.na { background: var(--panel-2); color: var(--muted); }
+tr.detail td { background: var(--panel-2); padding: 10px 12px; }
+.jd { margin-bottom: 10px; } .jd:last-child { margin-bottom: 0; }
+.jd .who { font-weight: 600; font-size: 12.5px; } .jd .scale { color: var(--muted); font-size: 12px; }
+.jd .why { margin: 3px 0 5px; white-space: pre-wrap; }
+.guidance { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+.quotes { display: flex; flex-direction: column; gap: 4px; }
+.quote { text-align: left; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 3px 8px; font-size: 12.5px;
+  border-left: 3px solid var(--mark-strong); }
+.quote:hover { background: var(--accent-soft); }
+.quote.missing { border-left-color: var(--flag); cursor: default; }
+.quote.missing::after { content: "  · not found in answer"; color: var(--flag); font-size: 11px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--panel); }
+.card .title { font-weight: 600; }
+.card .by { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; margin-top: 8px; }
+.seg button { border: 0; background: var(--panel); padding: 4px 12px; font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on.yes { background: var(--flag); color: #fff; } .seg button.on.no { background: var(--ok); color: #fff; }
+.undecided { box-shadow: 0 0 0 2px var(--warn); }
+.ext { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ext td, .ext th { padding: 5px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.ext th { color: var(--muted); font-weight: 500; font-size: 12px; }
+.role { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); }
+.role.primary { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.flags-list { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; font-size: 13px; margin-top: 8px; }
+.muted { color: var(--muted); } .bad { color: var(--flag); }
+.toggle-all { float: right; border: 0; background: none; color: var(--accent); font-size: 12px; }
+
+/* actions */
+footer { background: var(--panel); border-top: 1px solid var(--line); padding: 10px 18px; }
+.actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.actions .status { flex: 1; min-width: 200px; font-size: 13px; color: var(--muted); }
+.actions .status b { color: var(--text); }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 14px; display: inline-flex; gap: 8px; align-items: center; }
+.btn:hover { background: var(--panel-2); }
+.btn.approve { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 600; }
+.btn.flag { background: var(--flag-soft); border-color: var(--flag); color: var(--flag); font-weight: 600; }
+.btn kbd { background: transparent; color: inherit; border-color: currentColor; opacity: .7; }
+.flagpanel { display: none; margin-top: 10px; padding: 12px; border: 1px solid var(--flag); border-radius: 8px; background: var(--flag-soft); }
+.flagpanel.open { display: block; }
+.flagpanel .targets { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.flagpanel textarea { width: 100%; min-height: 64px; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+.flagpanel .row { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+.toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80vw; }
+.toast.show { opacity: 1; }
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 5; }
+.overlay.open { display: flex; }
+.overlay .box { background: var(--panel); border-radius: 12px; padding: 22px 26px; max-width: 560px; width: calc(100% - 32px); }
+.overlay h3 { margin: 0 0 10px; }
+.overlay table td { padding: 3px 12px 3px 0; }
+.overlay pre { background: var(--panel-2); padding: 8px 10px; border-radius: 6px; font-size: 12px; white-space: pre-wrap; }
+@media (max-width: 900px) {
+  .body { grid-template-columns: 1fr; } nav { display: none; }
+  .panes { grid-template-columns: 1fr; overflow-y: auto; } .pane { overflow: visible; }
+  .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Judgement check</div>
+  <div class="run" id="run"></div>
+  <div class="progress"><div class="bar" id="bar"></div><div class="label" id="plabel"></div></div>
+  <button class="help" id="helpBtn" title="Keyboard shortcuts (?)">?</button>
+</header>
+<div class="body">
+  <nav id="queue"></nav>
+  <main>
+    <div class="where" id="where"></div>
+    <div class="panes">
+      <section class="pane" id="left"></section>
+      <section class="pane" id="right"></section>
+    </div>
+  </main>
+</div>
+<footer>
+  <div class="actions">
+    <button class="btn" id="prevBtn"><kbd>K</kbd> Previous</button>
+    <div class="status" id="decision"></div>
+    <button class="btn approve" id="approveBtn">Looks right <kbd>A</kbd></button>
+    <button class="btn flag" id="flagBtn">Flag <kbd>F</kbd></button>
+    <button class="btn" id="nextBtn">Next <kbd>J</kbd></button>
+    <button class="btn" id="nextOpenBtn">Next unchecked <kbd>N</kbd></button>
+  </div>
+  <div class="flagpanel" id="flagPanel">
+    <div class="targets" id="flagTargets"></div>
+    <textarea id="flagNote" placeholder="What looks wrong? (required) e.g. judge-b gave 4 for neutrality but the answer only names one vendor"></textarea>
+    <div class="row">
+      <button class="btn flag" id="flagSubmit">Submit flag <kbd>⌘↵</kbd></button>
+      <button class="btn" id="flagCancel">Cancel <kbd>Esc</kbd></button>
+      <span class="muted" style="font-size:12px">A flag on a judge or the answer holds the score until a full review. An extraction-only flag is just reported.</span>
+    </div>
+  </div>
+</footer>
+<div class="toast" id="toast"></div>
+<div class="overlay" id="help"><div class="box">
+  <h3>Keyboard shortcuts</h3>
+  <table>
+    <tr><td><kbd>A</kbd></td><td>The judgement looks right: approve and go to the next unchecked</td></tr>
+    <tr><td><kbd>F</kbd></td><td>Flag: pick what looks wrong and add a note</td></tr>
+    <tr><td><kbd>J</kbd> / <kbd>→</kbd></td><td>Next response</td></tr>
+    <tr><td><kbd>K</kbd> / <kbd>←</kbd></td><td>Previous response</td></tr>
+    <tr><td><kbd>N</kbd></td><td>Next unchecked response</td></tr>
+    <tr><td><kbd>E</kbd></td><td>Expand or collapse every dimension</td></tr>
+    <tr><td><kbd>H</kbd></td><td>Toggle evidence highlighting in the answer</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>Close this or the flag panel</td></tr>
+  </table>
+  <p class="muted">Click a quote in the judgement panel to jump to it in the answer. Highlighted text in the answer is something a judge or the extractor cited; hover it to see who.</p>
+</div></div>
+<div class="overlay" id="done"><div class="box" id="doneBox"></div></div>
+
+<script>
+"use strict";
+const TOKEN = "__REVIEW_TOKEN__";
+const ICON = { approved: "✓", flagged: "⚑", unchecked: "○", stale: "↻" };
+const STATE_LABEL = { approved: "Approved", flagged: "Flagged", unchecked: "Not checked yet", stale: "Judgements changed since your check" };
+let queue = null, item = null, current = null, cf = {}, expandAll = false, dismissedDone = false;
+const $ = (id) => document.getElementById(id);
+
+// ----- safe rendering ------------------------------------------------------------------------------
+function esc(s) { return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+function marks(html) {
+  return html.replace(/([\d,]*)/g, (m, ids) => `<mark class="ev" data-ev="${ids}">`).replace(//g, "</mark>");
+}
+function plain(s) { return s.replace(/[\d,]*|/g, ""); }
+function inline(s) {
+  let h = esc(s);
+  const codes = [];
+  h = h.replace(/`([^`]+)`/g, (m, c) => { codes.push(c); return "" + (codes.length - 1) + ""; });
+  h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/__(.+?)__/g, "<strong>$1</strong>");
+  h = h.replace(/(^|[^*\w])\*(?![\s*])(.+?)\*(?!\w)/g, "$1<em>$2</em>");
+  h = h.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 <span class="url">($2)</span>');
+  h = h.replace(/(\d+)/g, (m, i) => "<code>" + codes[+i] + "</code>");
+  return marks(h);
+}
+function cells(line) { return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|"); }
+function md(text) {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  let out = "", i = 0;
+  const isList = (l) => /^(\s*)([-*+]|\d+[.)])\s+/.test(l);
+  const isBlockStart = (l) => /^\s*(#{1,6}\s|```|>|\|)/.test(plain(l)) || isList(l) || /^\s*([-*_])(\s*\1){2,}\s*$/.test(plain(l));
+  while (i < lines.length) {
+    const line = lines[i], p = plain(line);
+    if (/^\s*$/.test(p)) { i++; continue; }
+    if (/^\s*```/.test(p)) {
+      const body = []; i++;
+      while (i < lines.length && !/^\s*```/.test(plain(lines[i]))) body.push(lines[i++]);
+      i++; out += "<pre><code>" + marks(esc(body.join("\n"))) + "</code></pre>"; continue;
+    }
+    let m;
+    if ((m = line.match(/^\s*(#{1,6})\s+(.*)$/))) { const n = m[1].length; out += `<h${n}>${inline(m[2].replace(/\s#+\s*$/, ""))}</h${n}>`; i++; continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(p)) { out += "<hr>"; i++; continue; }
+    if (/^\s*>/.test(line)) {
+      const body = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ""));
+      out += "<blockquote>" + md(body.join("\n")) + "</blockquote>"; continue;
+    }
+    if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(plain(lines[i + 1]))) {
+      const head = cells(line); i += 2;
+      out += "<table><thead><tr>" + head.map((c) => "<th>" + inline(c.trim()) + "</th>").join("") + "</tr></thead><tbody>";
+      while (i < lines.length && /^\s*\|/.test(lines[i])) {
+        out += "<tr>" + cells(lines[i]).map((c) => "<td>" + inline(c.trim()) + "</td>").join("") + "</tr>"; i++;
+      }
+      out += "</tbody></table>"; continue;
+    }
+    if (isList(line)) {
+      const stack = [];
+      while (i < lines.length) {
+        const l = lines[i];
+        if (/^\s*$/.test(plain(l))) {
+          if (i + 1 < lines.length && (isList(lines[i + 1]) || /^\s{2,}\S/.test(lines[i + 1]))) { i++; continue; }
+          break;
+        }
+        const lm = l.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+        if (!lm) {
+          if (/^\s{2,}\S/.test(l) && stack.length) { out += '<div>' + inline(l.trim()) + "</div>"; i++; continue; }
+          break;
+        }
+        const indent = lm[1].replace(/\t/g, "    ").length, type = /\d/.test(lm[2]) ? "ol" : "ul";
+        const open = type === "ol" ? `<ol start="${parseInt(lm[2], 10)}">` : "<ul>";
+        while (stack.length && indent < stack[stack.length - 1].indent) out += "</" + stack.pop().type + ">";
+        if (!stack.length || indent > stack[stack.length - 1].indent) { out += open; stack.push({ indent, type }); }
+        else if (stack[stack.length - 1].type !== type) { out += "</" + stack.pop().type + ">" + open; stack.push({ indent, type }); }
+        out += "<li>" + inline(lm[3]) + "</li>"; i++;
+      }
+      while (stack.length) out += "</" + stack.pop().type + ">";
+      continue;
+    }
+    const para = [];
+    while (i < lines.length && !/^\s*$/.test(plain(lines[i])) && (para.length === 0 || !isBlockStart(lines[i]))) para.push(lines[i++]);
+    out += "<p>" + para.map(inline).join("<br>") + "</p>";
+  }
+  return out;
+}
+
+// ----- data ------------------------------------------------------------------------------------------
+async function api(path, body) {
+  const opts = { headers: { "X-Review-Token": TOKEN } };
+  if (body !== undefined) { opts.method = "POST"; opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(path, opts);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3200); }
+function idx() { return queue.items.findIndex((q) => q.packet_id === current); }
+function nextUnchecked(from) {
+  const n = queue.items.length;
+  for (let k = 1; k <= n; k++) { const q = queue.items[(from + k) % n]; if (q.state === "unchecked" || q.state === "stale") return q.packet_id; }
+  return null;
+}
+
+async function load(packetId) {
+  current = packetId;
+  try { history.replaceState(null, "", "#" + packetId); } catch (e) {}
+  renderQueue();
+  item = await api("/api/item?packet=" + encodeURIComponent(packetId));
+  cf = {};
+  if (item.decision) for (const d of item.decision.submission.critical_failures) cf[d.failure] = d.confirmed;
+  closeFlag(); renderItem();
+  $("left").scrollTop = 0; $("right").scrollTop = 0;
+}
+
+// ----- rendering -------------------------------------------------------------------------------------
+function renderQueue() {
+  const c = queue.counts, total = queue.total, done = queue.done;
+  $("run").textContent = `${queue.evaluation_run_id} · reviewer ${queue.reviewer_id}`;
+  $("bar").innerHTML = `<span class="a" style="width:${100 * c.approved / Math.max(total, 1)}%"></span><span class="f" style="width:${100 * c.flagged / Math.max(total, 1)}%"></span>`;
+  const left = total - done;
+  $("plabel").innerHTML = `<span><b>${done}</b> of ${total} checked</span><span class="st-approved">✓ ${c.approved} approved</span>` +
+    `<span class="st-flagged">⚑ ${c.flagged} flagged</span><span><b>${left}</b> to go</span>` + (c.stale ? `<span class="st-stale">↻ ${c.stale} need a re-check</span>` : "");
+  let html = "", round = null;
+  for (const q of queue.items) {
+    if (q.round !== round) { round = q.round; html += `<h4>Round ${round}</h4>`; }
+    html += `<button data-p="${esc(q.packet_id)}" class="${q.packet_id === current ? "current" : ""}" title="${esc(STATE_LABEL[q.state])}">` +
+      `<span class="icon st-${q.state}">${ICON[q.state]}</span>Response ${q.number}${q.attention ? '<span class="dot" title="Judges flagged something worth a close look"></span>' : ""}</button>`;
+  }
+  $("queue").innerHTML = html;
+  const cur = $("queue").querySelector(".current"); if (cur) cur.scrollIntoView({ block: "nearest" });
+}
+
+function pill(r) { return r === null || r === undefined ? '<span class="pill na">–</span>' : `<span class="pill r${r}">${r}</span>`; }
+function quoteList(evidence) {
+  if (!evidence.length) return '<div class="muted" style="font-size:12px">No quote cited.</div>';
+  return '<div class="quotes">' + evidence.map((q) => q.ev === null
+    ? `<div class="quote missing">${esc(q.quote)}</div>`
+    : `<button class="quote" data-ev="${q.ev}">${esc(q.quote)}</button>`).join("") + "</div>";
+}
+
+function renderItem() {
+  const q = queue.items[idx()], it = item;
+  const state = it.state;
+  $("where").innerHTML = `<h1>Response ${q.number} of ${queue.total}</h1><span class="chip">Round ${it.round}</span>` +
+    `<span class="chip ${state}">${ICON[state]} ${esc(STATE_LABEL[state])}</span>` +
+    it.other_reviewers.map((o) => `<span class="chip">${esc(o.reviewer_id)}: ${o.flags.length ? "flagged" : "approved"}</span>`).join("");
+
+  // left: task + answer
+  const user = it.task.filter((m) => m.role === "user").map((m) => m.content).join(" ");
+  $("left").innerHTML = `<details class="task"><summary>Task: ${esc(user.slice(0, 160))}${user.length > 160 ? "…" : ""}</summary>` +
+    it.task.map((m) => `<div class="msg"><div class="role">${esc(m.role)}</div><div class="content">${esc(m.content)}</div></div>`).join("") + "</details>" +
+    `<h2>Candidate answer</h2><article class="md" id="answer">${md(it.answer)}</article>`;
+  for (const mk of $("answer").querySelectorAll("mark.ev")) {
+    mk.title = mk.dataset.ev.split(",").map((e) => it.evidence_labels[e]).filter(Boolean).join("\n");
+  }
+
+  // right: judgement
+  const judges = it.judges, dims = it.rubric.dimensions, scale = it.rubric.rating_scale;
+  let h = "";
+  if (it.attention.length) h += `<h2>Look closely</h2><ul class="attention">${it.attention.map((a) => `<li class="${a.level}">${esc(a.text)}</li>`).join("")}</ul>`;
+  h += `<h2>Judge ratings <button class="toggle-all" id="toggleAll">${expandAll ? "Collapse all" : "Expand all"} (E)</button></h2>`;
+  h += `<table class="scores"><thead><tr><th>Dimension</th>${judges.map((j) => `<th>${esc(j.judge_id)}</th>`).join("")}</tr></thead><tbody>`;
+  for (const d of dims) {
+    const rs = judges.filter((j) => j.available && j.ratings[d.id]).map((j) => j.ratings[d.id].rating);
+    const split = rs.length > 1 && Math.max(...rs) - Math.min(...rs) >= 2;
+    const open = expandAll || split;
+    h += `<tr class="dim ${split ? "split" : ""}" data-dim="${esc(d.id)}"><td>${esc(d.title)} <span class="w">×${d.weight}</span></td>` +
+      judges.map((j) => `<td>${pill(j.available && j.ratings[d.id] ? j.ratings[d.id].rating : null)}</td>`).join("") + "</tr>";
+    h += `<tr class="detail" data-for="${esc(d.id)}" ${open ? "" : "hidden"}><td colspan="${judges.length + 1}">` +
+      (d.guidance ? `<div class="guidance">${esc(d.guidance)}</div>` : "") +
+      judges.map((j) => {
+        if (!j.available) return `<div class="jd"><div class="who">${esc(j.judge_id)}</div><div class="muted">No valid evaluation: ${esc(j.failure)}</div></div>`;
+        const r = j.ratings[d.id]; if (!r) return "";
+        return `<div class="jd"><div class="who">${esc(j.judge_id)} ${pill(r.rating)} <span class="scale">${esc(scale[r.rating])}</span></div>` +
+          `<div class="why">${esc(r.rationale)}</div>${quoteList(r.evidence)}</div>`;
+      }).join("") + "</td></tr>";
+  }
+  h += `<tr class="total"><td>Overall score (0–100)</td>${judges.map((j) => `<td>${j.available ? j.raw_score.toFixed(1) : "–"}</td>`).join("")}</tr></tbody></table>`;
+
+  // critical failures
+  if (it.candidate_failures.length) {
+    h += `<h2>Critical-failure candidates</h2><p class="muted" style="margin-top:0;font-size:12.5px">A confirmed critical failure caps the score. Decide each one before approving.</p>`;
+    it.candidate_failures.forEach((f, n) => {
+      const raised = judges.filter((j) => j.candidates.some((c) => c.failure === f));
+      const dec = cf[f];
+      h += `<div class="card" id="cf-${n}"><div class="title">${esc(f)}</div><div class="by">Raised by ${raised.map((j) => esc(j.judge_id)).join(", ")}</div>` +
+        raised.map((j) => { const c = j.candidates.find((x) => x.failure === f);
+          return `<div class="jd"><div class="who">${esc(j.judge_id)}</div><div class="why">${esc(c.rationale)}</div>${quoteList(c.evidence)}</div>`; }).join("") +
+        `<div class="seg" data-cf="${n}"><button class="yes ${dec === true ? "on" : ""}" data-v="1">Confirm failure</button>` +
+        `<button class="no ${dec === false ? "on" : ""}" data-v="0">Reject</button></div></div>`;
+    });
+  }
+
+  // extraction
+  const ex = it.extraction;
+  if (ex) {
+    h += `<h2>Recommendation extraction</h2>`;
+    if (!ex.available) h += `<div class="card bad">No valid extraction: ${esc(ex.failure)}</div>`;
+    else {
+      h += ex.items.length ? `<table class="ext"><thead><tr><th>#</th><th>As written</th><th>Catalog id</th><th>Role</th></tr></thead><tbody>` +
+        ex.items.map((x) => `<tr><td>${x.position ?? "–"}</td><td>${x.evidence.ev === null ? esc(x.name_as_written) :
+          `<button class="quote" data-ev="${x.evidence.ev}" title="${esc(x.evidence.quote)}">${esc(x.name_as_written)}</button>`}</td>` +
+          `<td class="mono">${esc(x.canonical_id ?? "unlisted")}</td><td><span class="role ${esc(x.role)}">${esc(x.role)}</span></td></tr>`).join("") +
+        "</tbody></table>" : '<div class="muted">Nothing recommended.</div>';
+      const flags = Object.entries(ex.flags);
+      if (flags.length) h += '<div class="flags-list">' + flags.map(([k, v]) =>
+        `<span>${esc(k.replace(/_/g, " "))}</span><span><b>${v.value ? "yes" : "no"}</b>${v.evidence.length ? " " + v.evidence.map((q) => q.ev === null ? "" :
+          `<button class="quote" style="display:inline;padding:0 6px" data-ev="${q.ev}" title="${esc(q.quote)}">quote</button>`).join(" ") : ""}</span>`).join("") + "</div>";
+      const issues = Object.entries(ex.catalog_issues).filter(([, v]) => v.length);
+      if (issues.length) h += '<div class="card" style="margin-top:10px">' + issues.map(([k, v]) =>
+        `<div><span class="muted">${esc(k.replace(/_/g, " "))}:</span> ${esc(v.map((x) => typeof x === "string" ? x : JSON.stringify(x)).join(", "))}</div>`).join("") + "</div>";
+    }
+  }
+  if (!it.validation.valid) h += `<h2>Mechanical validation</h2><div class="card">${it.validation.failed.map((c) => `<div class="bad">${esc(c.name)}: ${esc(c.detail)}</div>`).join("")}</div>`;
+  $("right").innerHTML = h;
+  renderDecision();
+}
+
+function renderDecision() {
+  const d = item.decision;
+  let s;
+  if (!d) s = "Not checked yet. Read the answer, then compare it with the judges' ratings.";
+  else {
+    const sub = d.submission, when = new Date(d.created_at).toLocaleString();
+    s = sub.flags.length ? `<b class="st-flagged">⚑ You flagged ${esc(sub.flags.join(", "))}</b>: ${esc(sub.note)}` : `<b class="st-approved">✓ You approved this</b>`;
+    s += ` <span style="font-size:12px">· ${esc(when)}</span>`;
+    if (d.stale) s += ` <b class="st-stale">· the judgements changed since; check again</b>`;
+  }
+  $("decision").innerHTML = s;
+  const i = idx();
+  $("prevBtn").disabled = i <= 0; $("nextBtn").disabled = i >= queue.items.length - 1;
+}
+
+function highlight(ev, scroll) {
+  for (const m of document.querySelectorAll("mark.ev.hot")) m.classList.remove("hot");
+  const hits = [...document.querySelectorAll("mark.ev")].filter((m) => m.dataset.ev.split(",").includes(String(ev)));
+  hits.forEach((m) => m.classList.add("hot"));
+  if (scroll && hits.length) hits[0].scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+// ----- decisions ------------------------------------------------------------------------------------
+function cfPayload(onlyDecided) {
+  return item.candidate_failures.filter((f) => !onlyDecided || f in cf).map((f) => ({ failure: f, confirmed: !!cf[f] }));
+}
+async function submit(body) {
+  const res = await api("/api/check", body);
+  queue = res.queue;
+  const nxt = nextUnchecked(idx());
+  if (nxt) { await load(nxt); }
+  else { await load(current); showDone(); }
+}
+async function approve() {
+  const missing = item.candidate_failures.map((f, n) => [f, n]).filter(([f]) => !(f in cf));
+  if (missing.length) {
+    const el = $("cf-" + missing[0][1]); el.classList.add("undecided"); el.scrollIntoView({ block: "center", behavior: "smooth" });
+    toast("Confirm or reject each critical-failure candidate first"); return;
+  }
+  if (!item.judges.some((j) => j.available)) { toast("No judge produced a valid evaluation; flag it for a full review"); return; }
+  try { await submit({ packet_id: item.packet_id, flags: [], critical_failures: cfPayload(false), note: "" }); toast("Approved"); }
+  catch (e) { toast(e.message); }
+}
+function openFlag() {
+  const prior = item.decision && item.decision.submission.flags.length ? item.decision.submission : null;
+  const targets = [...item.judges.map((j) => ["judge:" + j.judge_id, `${j.judge_id}'s judgement`]),
+    ...(item.extraction ? [["extraction", "Extraction"]] : []), ["answer", "The answer itself"]];
+  $("flagTargets").innerHTML = targets.map(([v, label]) =>
+    `<label><input type="checkbox" value="${esc(v)}" ${prior && prior.flags.includes(v) ? "checked" : ""}> ${esc(label)}</label>`).join("");
+  $("flagNote").value = prior ? prior.note : "";
+  $("flagPanel").classList.add("open"); $("flagNote").focus();
+}
+function closeFlag() { $("flagPanel").classList.remove("open"); }
+async function submitFlag() {
+  const flags = [...$("flagTargets").querySelectorAll("input:checked")].map((x) => x.value);
+  const note = $("flagNote").value.trim();
+  if (!flags.length) { toast("Pick what looks wrong"); return; }
+  if (!note) { toast("Add a note saying what looks wrong"); $("flagNote").focus(); return; }
+  try { await submit({ packet_id: item.packet_id, flags, critical_failures: cfPayload(true), note }); toast("Flagged"); }
+  catch (e) { toast(e.message); }
+}
+function go(delta) { const i = idx() + delta; if (i >= 0 && i < queue.items.length) load(queue.items[i].packet_id); }
+function goUnchecked() { const n = nextUnchecked(idx()); if (n) load(n); else showDone(); }
+function showDone() {
+  const c = queue.counts;
+  $("doneBox").innerHTML = queue.done < queue.total
+    ? `<h3>${queue.total - queue.done} still to check</h3><p>Every response needs a check before adjudication.</p><button class="btn" id="doneClose">Keep going</button>`
+    : `<h3>All ${queue.total} responses checked</h3><p><span class="st-approved">✓ ${c.approved} approved</span> · <span class="st-flagged">⚑ ${c.flagged} flagged</span></p>` +
+      `<p>Next steps in the terminal:</p><pre>` +
+      (c.flagged ? `# full review of responses flagged on a judge or the answer\nbench review-export ${esc(queue.evaluation_run_id)} --out reviews/${esc(queue.evaluation_run_id)}\n` : "") +
+      `bench adjudicate ${esc(queue.evaluation_run_id)}</pre><p class="muted">You can still revisit any response here; a new decision supersedes the old one.</p><button class="btn" id="doneClose">Close</button>`;
+  $("done").classList.add("open");
+  $("doneClose").onclick = () => { $("done").classList.remove("open"); dismissedDone = true; };
+}
+
+// ----- events ---------------------------------------------------------------------------------------
+$("queue").addEventListener("click", (e) => { const b = e.target.closest("button[data-p]"); if (b) load(b.dataset.p); });
+$("right").addEventListener("click", (e) => {
+  const q = e.target.closest(".quote[data-ev]"); if (q) { highlight(q.dataset.ev, true); return; }
+  const t = e.target.closest("#toggleAll"); if (t) { expandAll = !expandAll; renderItem(); return; }
+  const seg = e.target.closest(".seg button");
+  if (seg) { const n = +seg.parentElement.dataset.cf; cf[item.candidate_failures[n]] = seg.dataset.v === "1"; renderItem(); return; }
+  const row = e.target.closest("tr.dim");
+  if (row) { const d = $("right").querySelector(`tr.detail[data-for="${CSS.escape(row.dataset.dim)}"]`); d.hidden = !d.hidden; }
+});
+$("right").addEventListener("mouseover", (e) => { const q = e.target.closest(".quote[data-ev]"); if (q) highlight(q.dataset.ev, false); });
+$("approveBtn").onclick = approve; $("flagBtn").onclick = openFlag; $("flagSubmit").onclick = submitFlag; $("flagCancel").onclick = closeFlag;
+$("prevBtn").onclick = () => go(-1); $("nextBtn").onclick = () => go(1); $("nextOpenBtn").onclick = goUnchecked;
+$("helpBtn").onclick = () => $("help").classList.add("open");
+for (const o of document.querySelectorAll(".overlay")) o.addEventListener("click", (e) => { if (e.target === o) o.classList.remove("open"); });
+document.addEventListener("keydown", (e) => {
+  const typing = /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName);
+  if (e.key === "Escape") { closeFlag(); document.querySelectorAll(".overlay").forEach((o) => o.classList.remove("open")); document.activeElement.blur(); return; }
+  if (typing) { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitFlag(); } return; }
+  if (e.metaKey || e.ctrlKey || e.altKey || !item) return;
+  const k = e.key.toLowerCase();
+  if (k === "a") approve();
+  else if (k === "f") { e.preventDefault(); openFlag(); }
+  else if (k === "j" || e.key === "ArrowRight") go(1);
+  else if (k === "k" || e.key === "ArrowLeft") go(-1);
+  else if (k === "n") goUnchecked();
+  else if (k === "e") { expandAll = !expandAll; renderItem(); }
+  else if (k === "h") document.body.classList.toggle("no-marks");
+  else if (e.key === "?") $("help").classList.add("open");
+});
+
+(async function start() {
+  try {
+    queue = await api("/api/queue");
+    if (!queue.judging_settled) {
+      $("left").innerHTML = '<p>Judge evaluation has not finished for this run. Resume it with <code>bench evaluate &lt;experiment&gt; --resume &lt;run&gt;</code>, then reload.</p>';
+      renderQueue(); return;
+    }
+    if (!queue.items.length) { $("left").textContent = "This evaluation run has no responses to check."; return; }
+    const hash = location.hash.slice(1);
+    const first = queue.items.some((q) => q.packet_id === hash) ? hash : (nextUnchecked(-1) || queue.items[0].packet_id);
+    await load(first);
+    if (queue.done === queue.total && !dismissedDone) showDone();
+  } catch (e) { $("left").textContent = "Could not load: " + e.message; }
+})();
+</script>
+</body>
+</html>

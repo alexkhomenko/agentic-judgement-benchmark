@@ -1,5 +1,5 @@
-"""Evaluation invariants: blinding, judge independence, retries, review selection, human review,
-adjudication, append-only lineage, and report reproducibility."""
+"""Evaluation invariants: blinding, judge independence, retries, attention signals, human checks of every
+response, full review of flagged responses, adjudication, append-only lineage, and report reproducibility."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from archbench.domain.common import sha256_text
 from archbench.domain.plan import ExperimentPlan
 from archbench.domain.records import Record, RecordKind
 from archbench.evaluation.adjudication import adjudicate
+from archbench.evaluation.checks import CheckError, RunIndex, candidate_failures, item_view, locate, mark_answer, record_check
 from archbench.evaluation.judging import JUDGE_TAG, evaluation_messages, parse_judge_output
 from archbench.evaluation.records import effective, read_packet, run_records
 from archbench.evaluation.review import (
@@ -28,7 +29,13 @@ from archbench.evaluation.review import (
     selection_record_id,
     stratified_sample,
 )
-from archbench.evaluation.runner import EvaluationStatus, load_run, resume_evaluation, start_evaluation
+from archbench.evaluation.runner import (
+    EvaluationStatus,
+    evaluation_status,
+    load_run,
+    resume_evaluation,
+    start_evaluation,
+)
 from archbench.execution.controller import Controller
 from archbench.reporting.report import ReportInputError, publish_report
 
@@ -96,6 +103,21 @@ def review_all(env: Env, run: Record, **kwargs: Any) -> None:
     assert selection is not None
     for item in selection.payload["items"]:
         submit(env, run, item["packet_id"], **kwargs)
+
+
+def check(env: Env, run: Record, packet_id: str, *, flags: tuple[str, ...] = (), confirm: tuple[str, ...] = (),
+          reviewer: str = "reviewer-1", note: str = "", decide: bool = True) -> Record:
+    index = RunIndex.build(env.db, load_run(env.db, run.record_id))
+    candidates = candidate_failures(index.chosen_judges(packet_id)) if decide else []
+    body = {"packet_id": packet_id, "reviewer_id": reviewer, "flags": list(flags),
+            "critical_failures": [{"failure": f, "confirmed": f in confirm} for f in candidates],
+            "note": note or ("looks off" if flags else "")}
+    return record_check(env.db, env.store, index, body)[0]
+
+
+def check_all(env: Env, run: Record, **kwargs: Any) -> None:
+    for packet in records(env, run, RecordKind.BLINDED_PACKET):
+        check(env, run, packet.record_id, **kwargs)
 
 
 def records(env: Env, run: Record, kind: RecordKind) -> list[Record]:
@@ -197,7 +219,7 @@ def test_invalid_judge_output_is_a_new_attempt_and_first_valid_is_used(env: Env)
     assert sorted((r.payload["attempt_no"], r.payload["status"]) for r in judge_a) == (
         [(1, "invalid_output")] * 4 + [(2, "completed")] * 4)
     ctx = load_run(env.db, run.record_id)
-    review_all(env, run)
+    check_all(env, run)
     adjudicate(env.db, run, ctx.policy, ctx.rubric)
     valid = {r.record_id for r in judge_a if r.payload["status"] == "completed"}
     adjudications = records(env, run, RecordKind.ADJUDICATION)
@@ -282,8 +304,14 @@ def test_review_export_reveals_no_judge_or_identity_information(env: Env, tmp_pa
     plan = executed(env, "exp-export", repetitions=1)
     run, _ = evaluate(env, plan, policy(env, judge_a={"flag_critical_if_contains": "Category:"}))
     out = tmp_path / "export"
+    assert export_reviews(env.db, env.store, run, out) == []  # nothing flagged yet
+    packets = records(env, run, RecordKind.BLINDED_PACKET)
+    check(env, run, packets[0].record_id, flags=("judge:judge-a",))
+    check(env, run, packets[1].record_id, flags=("answer",))
+    check(env, run, packets[3].record_id)
     written = export_reviews(env.db, env.store, run, out)
-    assert written
+    assert sorted(p.name for p in written) == sorted(
+        f"{p.record_id}.{kind}.json" for p in packets[:2] for kind in ("packet", "review"))
     judges = records(env, run, RecordKind.JUDGE_EVALUATION)
     forbidden = ["judge-a", "judge-b", "critical_failure_candidate", "high_example", "stratified_sample",
                  "fake judgement", plan.configurations[0].configuration.model,
@@ -294,6 +322,9 @@ def test_review_export_reveals_no_judge_or_identity_information(env: Env, tmp_pa
             assert term not in text, (path.name, term)
     with pytest.raises(FileExistsError):
         export_reviews(env.db, env.store, run, out)
+    for p in packets[:2]:  # once fully reviewed, a flagged response is no longer exported
+        submit(env, run, p.record_id)
+    assert export_reviews(env.db, env.store, run, tmp_path / "again") == []
 
 
 def test_human_review_import_validation_and_correction(env: Env) -> None:
@@ -355,20 +386,130 @@ def test_confirmed_critical_failure_caps_score_and_keeps_raw(env: Env) -> None:
         assert adj.payload["confirmed_critical_failures"] == [failure]
 
 
-def test_adjudication_waits_for_selected_reviews_and_uses_judges_otherwise(env: Env) -> None:
+def test_adjudication_waits_for_a_check_of_every_response(env: Env) -> None:
     plan = executed(env, "exp-adj")
     run, _ = evaluate(env, plan, policy(env))
     ctx = load_run(env.db, run.record_id)
-    selection = env.db.get_record(selection_record_id(run.record_id))
-    assert selection is not None
-    selected = {i["response_id"] for i in selection.payload["items"]}
+    packets = records(env, run, RecordKind.BLINDED_PACKET)
     progress = adjudicate(env.db, run, ctx.policy, ctx.rubric)
-    assert set(progress.pending_human_review) == selected
-    judge_based = records(env, run, RecordKind.ADJUDICATION)
-    assert {a.subject_id for a in judge_based} == {r.response_id for r in env.db.list_responses(plan.experiment_id)} - selected
-    for adj in judge_based:
-        assert adj.payload["basis"] == "judge_mean" and adj.payload["human_review_ids"] == []
-        assert set(adj.payload["judge_evaluation_ids"]) == {"judge-a", "judge-b"}
+    assert progress.added == 0 and len(progress.pending_human_check) == len(packets)
+
+    approved, judge_flag, answer_flag, later = packets[:4]
+    check(env, run, approved.record_id)
+    check(env, run, judge_flag.record_id, flags=("judge:judge-b",), note="judge-b ignores the missing approvals")
+    check(env, run, answer_flag.record_id, flags=("answer",), note="answer is cut off mid-table")
+    progress = adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    assert progress.added == 1
+    assert set(progress.pending_human_review) == {str(judge_flag.subject_id), str(answer_flag.subject_id)}
+    assert len(progress.pending_human_check) == len(packets) - 3
+    adj = records(env, run, RecordKind.ADJUDICATION)[0]
+    assert adj.subject_id == approved.subject_id and adj.payload["basis"] == "judge_mean_checked"
+    assert set(adj.payload["judge_evaluation_ids"]) == {"judge-a", "judge-b"}
+    assert len(adj.payload["human_check_ids"]) == 1 and adj.payload["human_check_ids"][0] in adj.inputs
+
+    status = evaluation_status(env.db, run.record_id)
+    assert status.human_checks.done == 3 and status.flagged == 2 and status.human_reviews.expected == 2
+    assert {"human_check", "human_review"} <= set(status.pending_stages)
+
+    # A full review resolves a flag; the rest are approved.
+    submit(env, run, judge_flag.record_id, rating=2)
+    submit(env, run, answer_flag.record_id, rating=1)
+    for p in packets[3:]:
+        check(env, run, p.record_id)
+    adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    status = evaluation_status(env.db, run.record_id)
+    assert status.complete and status.adjudications.done == len(packets)
+    basis = {a.subject_id: a.payload["basis"] for a in records(env, run, RecordKind.ADJUDICATION)}
+    assert basis[judge_flag.subject_id] == basis[answer_flag.subject_id] == "human_review"
+    assert basis[later.subject_id] == "judge_mean_checked"
+
+
+def test_check_validation_supersession_and_staleness(env: Env) -> None:
+    plan = executed(env, "exp-check", repetitions=1)
+    run, _ = evaluate(env, plan, policy(env, judge_a={"flag_critical_if_contains": "Category:"}))
+    ctx = load_run(env.db, run.record_id)
+    index = RunIndex.build(env.db, ctx)
+    packet = next(p for p in index.packets if candidate_failures(index.chosen_judges(p.record_id)))
+    pid = packet.record_id
+    failure = candidate_failures(index.chosen_judges(pid))[0]
+
+    with pytest.raises(CheckError, match="every critical-failure candidate"):
+        check(env, run, pid, decide=False)
+    with pytest.raises(CheckError, match="needs a note"):
+        record_check(env.db, env.store, index, {"packet_id": pid, "reviewer_id": "r", "flags": ["answer"]})
+    with pytest.raises(CheckError, match="unknown flags"):
+        check(env, run, pid, flags=("judges",))
+    with pytest.raises(CheckError, match="no judge"):
+        check(env, run, pid, flags=("judge:judge-z",))
+    with pytest.raises(CheckError, match="no recommendation extraction"):
+        check(env, run, pid, flags=("extraction",))
+    with pytest.raises(CheckError, match="does not belong"):
+        check(env, run, "pkt-unknown")
+    with pytest.raises(CheckError, match="not a critical-failure candidate"):
+        record_check(env.db, env.store, index, {"packet_id": pid, "reviewer_id": "r", "critical_failures": [
+            {"failure": ctx.rubric.critical_failures[-1] if ctx.rubric.critical_failures[-1] != failure
+             else ctx.rubric.critical_failures[0], "confirmed": True}]})
+    # Flagging a judge does not require deciding the candidates.
+    first = check(env, run, pid, flags=("judge:judge-a",), decide=False)
+    # Confirming the candidate on approval supersedes the flag and caps the adjudicated score.
+    second = check(env, run, pid, confirm=(failure,))
+    assert second.supersedes == first.record_id and env.db.get_record(first.record_id) == first
+    assert check(env, run, pid, confirm=(failure,)).record_id == second.record_id  # unchanged: not re-recorded
+    assert second.payload["judge_evaluation_ids"] == {j: r.record_id for j, r in index.chosen_judges(pid).items()}
+    for p in records(env, run, RecordKind.BLINDED_PACKET):
+        if p.record_id != pid:
+            check(env, run, p.record_id)
+    adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    adj = next(a for a in records(env, run, RecordKind.ADJUDICATION) if a.subject_id == packet.subject_id)
+    assert adj.payload["confirmed_critical_failures"] == [failure]
+    assert adj.payload["score"]["critical_failure_confirmed"] is True
+
+    # A check of records the packet no longer has is stale: it neither counts nor adjudicates.
+    stale_index = RunIndex.build(env.db, ctx)
+    stale_index.checks[pid] = [Record.model_validate({**second.model_dump(), "payload": {
+        **second.payload, "judge_evaluation_ids": {"judge-a": "jdg-old"}}})]
+    assert stale_index.state(pid) == "stale" and stale_index.current_checks(pid) == []
+
+
+def test_check_needs_a_judge_to_approve(env: Env) -> None:
+    plan = executed(env, "exp-check-nojudge", repetitions=1)
+    run, _ = evaluate(env, plan, policy(env, judge_a={"transient_failures": 9}, judge_b={"transient_failures": 9}))
+    pid = records(env, run, RecordKind.BLINDED_PACKET)[0].record_id
+    with pytest.raises(CheckError, match="nothing to approve"):
+        check(env, run, pid)
+    assert check(env, run, pid, flags=("answer",)).payload["blocking"] is True
+
+
+def test_item_view_is_blinded_and_highlights_cited_evidence(env: Env) -> None:
+    plan = executed(env, "exp-view", repetitions=1)
+    run, _ = evaluate(env, plan, policy(env, judge_a={"flag_critical_if_contains": "Category:"}))
+    ctx = load_run(env.db, run.record_id)
+    index = RunIndex.build(env.db, ctx)
+    pid = index.packets[0].record_id
+    view = item_view(index, env.store, env.db, pid, "reviewer-1")
+    assert [j["judge_id"] for j in view["judges"]] == ["judge-a", "judge-b"]
+    assert view["state"] == "unchecked" and view["decision"] is None
+    cited = [q for j in view["judges"] for d in j["ratings"].values() for q in d["evidence"]]
+    assert cited and all(q["ev"] is not None for q in cited)
+    assert "\ue000" in view["answer"] and "\ue002" in view["answer"]
+    text = json.dumps(view)
+    for term in [plan.configurations[0].configuration.model, plan.configurations[0].configuration.key,
+                 *(r.response_id for r in env.db.list_responses(plan.experiment_id)), "family-a", "family-b"]:
+        assert term not in text, term
+
+
+def test_evidence_location_and_marking() -> None:
+    answer = "intro\n## Framework Selection: **LangGraph**\n- Uses `LangChain` tooling\nplain line\ncontinues here"
+    start, end = locate("Framework Selection: LangGraph", answer)  # type: ignore[misc]
+    assert answer[start:end].startswith("Framework") and "##" not in answer[start:end]
+    assert locate("“uses langchain tooling”", answer) is not None
+    assert locate("not in the answer", answer) is None and locate("a", answer) is None
+    span = locate("tooling plain line continues", answer)
+    assert span is not None
+    marked = mark_answer(answer, [(*span, 0)])
+    for line in marked.split("\n"):  # never spans a line break, always balanced per line
+        assert line.count("\ue000") == line.count("\ue002")
+    assert marked.replace("\ue0000\ue001", "").replace("\ue002", "") == answer
 
 
 # ----- lineage and reporting -------------------------------------------------------------------------
@@ -382,7 +523,7 @@ def test_downstream_stages_never_change_upstream_rows(env: Env) -> None:
     resume_evaluation(env.db, env.store, default_registry(), run.record_id)
     stages.append(published_snapshot(env.db))
     assert stages[2] == stages[1]  # resume of a settled run appends nothing
-    review_all(env, run)
+    check_all(env, run)
     ctx = load_run(env.db, run.record_id)
     adjudicate(env.db, run, ctx.policy, ctx.rubric)
     stages.append(published_snapshot(env.db))
@@ -401,12 +542,12 @@ def test_report_is_reproducible_versioned_and_honest_about_incompleteness(env: E
     assert not status.complete
     partial = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
     assert partial.payload["evaluation_complete"] is False
-    assert "human_review" in partial.payload["pending_stages"]
+    assert "human_check" in partial.payload["pending_stages"]
     assert publish_report(env.db, env.store, plan.experiment_id, run.record_id).record_id == partial.record_id
     text = env.store.read_verified(env.db.artifacts_for(partial.record_id)["report.md"]).decode()
     assert "INCOMPLETE" in text
 
-    review_all(env, run)
+    check_all(env, run)
     ctx = load_run(env.db, run.record_id)
     adjudicate(env.db, run, ctx.policy, ctx.rubric)
     final = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
@@ -465,3 +606,70 @@ def test_evidence_check_tolerates_markdown_and_quotation_marks() -> None:
               ("d", "Uses an autonomous agent loop")]
     result = evidence_check(quotes, answer)
     assert result["verified"] == 3 and [u["where"] for u in result["unverified"]] == ["d"]
+
+
+def test_review_app_requires_token_and_records_checks(env: Env) -> None:
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from archbench.evaluation.review_app import ReviewApp, serve
+
+    plan = executed(env, "exp-app", repetitions=1)
+    run, _ = evaluate(env, plan, policy(env))
+    app = ReviewApp(env.db, env.store, run.record_id, "alex")
+    server, url = serve(app)
+    server.timeout = 0.05
+
+    def call(path: str, body: Any = None, token: str | None = app.token, host: str | None = None) -> tuple[int, Any]:
+        headers = {"Content-Type": "application/json"}
+        if token is not None:
+            headers["X-Review-Token"] = token
+        if host is not None:
+            headers["Host"] = host
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(url.rstrip("/") + path, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(request) as response:
+                raw = response.read()
+                return response.status, json.loads(raw) if path.startswith("/api") else raw.decode()
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+
+    results: dict[str, Any] = {}
+
+    def client() -> None:  # requests from a thread; the server answers on this one, like `bench review`
+        try:
+            results.update(run_client())
+        except BaseException as exc:  # surfaced below
+            results["error"] = exc
+
+    def run_client() -> dict[str, Any]:
+        status, page = call("/", token=None)
+        assert status == 200 and app.token in page and "__REVIEW_TOKEN__" not in page
+        assert call("/api/queue", token=None)[0] == 403
+        assert call("/api/queue", token="wrong")[0] == 403
+        assert call("/api/queue", host="evil.example:80")[0] == 403
+        status, queue = call("/api/queue")
+        assert status == 200 and queue["total"] == 4 and queue["done"] == 0 and queue["reviewer_id"] == "alex"
+        pid = queue["items"][0]["packet_id"]
+        status, item = call(f"/api/item?packet={pid}")
+        assert status == 200 and item["packet_id"] == pid
+        assert call("/api/check", {"packet_id": pid, "reviewer_id": "someone-else"})[0] == 400
+        status, error = call("/api/check", {"packet_id": pid, "flags": ["answer"]})
+        assert status == 400 and "note" in error["error"]
+        status, result = call("/api/check", {"packet_id": pid, "flags": ["answer"], "note": "truncated"})
+        assert status == 200 and result["created"] and result["queue"]["counts"]["flagged"] == 1
+        return {"check_id": result["check_id"]}
+
+    thread = threading.Thread(target=client)
+    thread.start()
+    try:
+        while thread.is_alive():
+            server.handle_request()
+    finally:
+        server.server_close()
+    if "error" in results:
+        raise results["error"]
+    check_record = env.db.get_record(results["check_id"])
+    assert check_record is not None and check_record.payload["reviewer_id"] == "alex"

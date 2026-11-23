@@ -209,6 +209,43 @@ class HumanReviewSubmission(Frozen):
     notes: str = ""
 
 
+CHECK_FLAG = re.compile(r"^(answer|extraction|judge:[a-z0-9][a-z0-9._-]*)$")
+
+
+class CheckedCriticalFailure(Frozen):
+    failure: str
+    confirmed: bool
+
+
+class HumanCheckSubmission(Frozen):
+    """A reviewer's check of one response's judgement, made while seeing the judges' assessments.
+
+    No flags approves the judgement: the judge mean stands, with each critical-failure candidate the judges
+    raised confirmed or rejected. A flag names what looks wrong: `judge:<judge_id>`, `extraction`, or
+    `answer` (the candidate answer itself is broken, truncated, or suspicious); a flagged check needs a note."""
+
+    packet_id: str
+    reviewer_id: str = Field(min_length=1)
+    flags: tuple[str, ...] = ()
+    critical_failures: tuple[CheckedCriticalFailure, ...] = ()
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _check(self) -> HumanCheckSubmission:
+        if len(set(self.flags)) != len(self.flags):
+            raise ValueError("duplicate flags")
+        if bad := [f for f in self.flags if not CHECK_FLAG.match(f)]:
+            raise ValueError(f"unknown flags: {bad}; use judge:<judge_id>, extraction, or answer")
+        if self.flags and not self.note.strip():
+            raise ValueError("a flagged check needs a note saying what looks wrong")
+        return self
+
+    @property
+    def blocking(self) -> bool:
+        """Flags on a judge or on the answer hold the response for a full human review."""
+        return any(f != "extraction" for f in self.flags)
+
+
 class ArchitectureCategory(StrEnum):
     INDEPENDENT_JOBS = "independent_jobs"
     SHARED_INFRASTRUCTURE = "shared_infrastructure"
