@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>V2 · Human validation</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#18232c;background:#f4f6f8;line-height:1.5}
+*{box-sizing:border-box}body{margin:0}header{background:#172e3c;color:white;padding:18px 28px;display:flex;justify-content:space-between;gap:20px}
+h1{font-size:20px;margin:0}h2{font-size:17px;margin:0 0 12px}h3{font-size:14px;margin:16px 0 6px}
+#layout{display:grid;grid-template-columns:270px 1fr;min-height:calc(100vh - 78px)}nav{border-right:1px solid #d9dfe3;padding:20px 12px}
+button{font:inherit;cursor:pointer;border:1px solid #b8c6d0;border-radius:7px;padding:9px 15px;background:white;color:#18232c}button:disabled{opacity:.5;cursor:default}
+nav button{display:block;width:100%;text-align:left;margin-bottom:8px;font-size:13px}nav button.active{border-color:#227a65;background:#e8f5ef}
+main{padding:24px;max-width:1700px;width:100%}.columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+.card{background:white;border:1px solid #dce2e7;border-radius:10px;padding:20px;margin-bottom:18px;overflow-wrap:anywhere}
+.answer,.task,.quote{white-space:pre-wrap}.answer{font-size:15px;line-height:1.7}.task{font-size:13px}.muted{color:#5c6b75;font-size:13px}
+.flag{background:#fff0eb;border:2px solid #c7532c;border-radius:8px;padding:14px;margin-bottom:16px}.flag h2{color:#953916}.flag ul{margin:8px 0 0;padding-left:22px}
+.ok{color:#167152}.pending{color:#975018}.quote{border-left:3px solid #b2c6d1;padding-left:12px;margin:8px 0;color:#455b68;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;text-align:left;border-bottom:1px solid #e7ecef;vertical-align:top}
+.decision{position:sticky;bottom:0;background:#f4f6f8f5;border-top:1px solid #d2dce3;padding:15px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.primary{background:#176a57;color:white;border-color:#176a57;font-weight:650}.flagButton{color:#9a3c1c;border-color:#d59c86}
+textarea{font:inherit;width:100%;min-height:88px;padding:10px;border:1px solid #aebfc9;border-radius:6px}#flagForm{display:none}
+#message{margin-left:auto;font-size:13px}#error{color:#a32828;white-space:pre-wrap}details{font-size:13px;margin-bottom:12px}summary{cursor:pointer}
+.filters{padding:0 4px 15px}.filters label{font-size:12px;display:block;margin:8px 0 4px}select{font:inherit;font-size:12px;width:100%;padding:8px;border:1px solid #b8c6d0;border-radius:6px;background:white;color:#18232c}
+.badge{display:inline-block;border-radius:4px;padding:2px 6px;background:#e8edf1;font-size:11px;margin:4px 3px 0 0}.badge.blocked{background:#ffe4d7;color:#8b3816}.badge.approved{background:#dbefe5;color:#176a57}
+.toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;font-size:12px}.toolbar a{color:#176a57}.toolbar button{font-size:12px;padding:6px 10px}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:#edf1f4;padding:12px;border-radius:5px}
+#outdated{background:#fff0d3;border:1px solid #bd8a34;padding:12px;margin-bottom:15px}#outdated button{margin-left:8px}.version{border-top:1px solid #dce2e7;padding:12px 0}.attempt{padding:10px;border-left:3px solid #b8c6d0;margin:10px 0}.attempt.failed{border-color:#c7532c}
+@media(max-width:900px){#layout{grid-template-columns:1fr}nav{border:0;display:flex;gap:8px;flex-wrap:wrap}nav button{width:auto}.columns{grid-template-columns:1fr}header{padding:16px}main{padding:16px}}
+</style></head><body>
+<header><div><h1>V2 · Human validation</h1><span style="font-size:13px">Review the answer and labels, then proceed or flag a concern.</span></div><div id="progress"></div></header>
+<div id="layout"><nav aria-label="Response queue"><div id="filters" class="filters" hidden>
+<b style="font-size:13px">Review inbox</b><label for="stateFilter">Status</label><select id="stateFilter"><option value="all">All answers</option><option value="needs_review">Needs review</option><option value="unchecked">Unreviewed</option><option value="flagged">Flagged</option><option value="stale">Stale approval</option><option value="blocked">Evaluation blocked</option><option value="approved">Approved</option></select>
+<label for="questionFilter">Question / scenario</label><select id="questionFilter"><option value="all">All questions</option></select>
+<label for="policyFilter">Evaluation policy</label><select id="policyFilter"><option value="all">All policies</option></select>
+<p class="muted">Unresolved first. Newest evidence first within each group.</p></div><div id="queue"></div></nav><main>
+<div class="toolbar"><button id="refresh">Refresh inbox</button><span id="live" class="muted">Refreshes automatically</span><a id="fullReport" hidden target="_blank" rel="noopener noreferrer">Full report (reveals candidate)</a><button id="inspect" hidden>Inspect failed attempts</button><button id="recovery" hidden>Recovery options</button></div>
+<div id="error" role="alert"></div><div id="outdated" hidden>Evaluation evidence changed. Reload before making a decision.<button id="reloadItem">Reload answer</button></div><div id="recoveryPanel" hidden class="card"></div><div id="content">Loading review…</div>
+<div id="flagForm" class="card"><label id="noteLabel" for="note">What needs attention?</label><p id="noteExplanation" class="muted"></p><textarea id="note"></textarea><button id="saveFlag" class="flagButton">Save flag</button> <button id="cancelFlag">Cancel</button></div>
+<div class="decision"><button id="proceed" class="primary" disabled>Proceed →</button><button id="proceedWithoutAudit" class="primary" hidden disabled>Proceed with audit unavailable</button><button id="flag" class="flagButton" disabled>Flag for follow-up</button><span id="message" role="status">No decision is saved until you choose an action.</span></div>
+</main></div>
+<script>
+"use strict";
+const TOKEN="__REVIEW_TOKEN__", $=id=>document.getElementById(id);
+let queue=null,item=null,busy=false,refreshing=false,loadSequence=0,noteDecision="flag";
+const esc=x=>String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nice=x=>esc(String(x).replaceAll("_"," "));
+const pct=x=>typeof x==="number"?(100*x).toFixed(1)+"%":"unavailable";
+const decisionLabel=x=>x==="proceed_without_audit"?"Proceed with audit unavailable":x;
+async function api(path,body){const r=await fetch(path,{method:body?"POST":"GET",headers:{"X-Review-Token":TOKEN,"Content-Type":"application/json"},...(body?{body:JSON.stringify(body)}:{})});const value=await r.json();if(!r.ok)throw Error(value.error||"Request failed");return value}
+function visibleItems(){
+  const s=$("stateFilter").value,q=$("questionFilter").value,p=$("policyFilter").value;
+  return queue.items.filter(e=>(s==="all"||(s==="needs_review"?(e.state!=="approved"||e.blocked):s==="blocked"?e.blocked:e.state===s))&&(q==="all"||e.scenario_id===q)&&(p==="all"||e.policy===p));
+}
+function options(id,values,label){const el=$(id),prior=el.value;el.innerHTML=`<option value="all">${label}</option>`+values.map(v=>`<option value="${esc(v)}">${esc(v.replace(/^agentic-design-bias-v2-/,""))}</option>`).join("");if(values.includes(prior))el.value=prior}
+function drawQueue(){
+  const c=queue.counts;
+  $("progress").textContent=queue.scope==="v2"?`${c.unchecked+c.stale} pending · ${c.flagged} flagged · ${c.blocked} blocked · ${c.approved} approved`:`${queue.done} / ${queue.total} approved · ${c.flagged} flagged`;
+  if(c.audit_unavailable)$("progress").textContent+=` · ${c.audit_unavailable} audit unavailable`;
+  $("filters").hidden=queue.scope!=="v2";
+  options("questionFilter",[...new Set(queue.items.map(e=>e.scenario_id).filter(Boolean))].sort(),"All questions");
+  options("policyFilter",[...new Set(queue.items.map(e=>e.policy).filter(Boolean))].sort(),"All policies");
+  const visible=visibleItems();
+  $("queue").innerHTML=visible.length?visible.map(e=>`<button data-p="${esc(e.packet_id)}" class="${item&&item.packet_id===e.packet_id?"active":""}">${e.attention?"⚑ ":""}${esc(e.label||`Response ${e.number}`)}<br>${e.question?`<span class="muted">${esc(e.question.replaceAll("-"," "))} · repetition ${esc(e.repetition)}</span><br>`:""}<span class="badge ${esc(e.state)}">${esc(e.state)}</span>${e.blocked?`<span class="badge blocked">${esc(e.automatic)}</span>`:""}${e.audit_resolution&&e.audit_resolution.status==="unavailable"?'<span class="badge">Audit unavailable · human resolved</span>':""}${e.updated_at?`<br><span class="muted">${esc(new Date(e.updated_at).toLocaleString())}</span>`:""}</button>`).join(""):'<p class="muted">No answers match these filters.</p>';
+}
+function buttons(){
+  $("proceed").disabled=busy||!item||item.outdated||!item.can_proceed;
+  $("proceed").hidden=!!(item&&item.can_proceed_without_audit);
+  $("proceedWithoutAudit").hidden=!(item&&item.can_proceed_without_audit);
+  $("proceedWithoutAudit").disabled=busy||!item||item.outdated||!item.can_proceed_without_audit;
+  $("flag").disabled=busy||!item||item.outdated||item.can_flag===false;
+}
+function historyView(){
+  if(!item.history)return "";
+  return `<details id="history" class="card"><summary>Evaluation & review history · ${item.history.length} version(s)</summary>`+item.history.map(v=>`<div class="version"><b>${esc(v.policy)} · ${v.active?"Active version":"Earlier version"}</b><p class="muted">${esc(v.evaluation_run_id)} · ${esc(new Date(v.created_at).toLocaleString())}</p>${v.reviews.map(r=>`<p>${esc(r.reviewer_id)} · ${esc(decisionLabel(r.decision))}${r.stale?" · stale":""}<br>${esc(r.note)}</p>`).join("")}${v.attempts.map(a=>`<div class="attempt ${a.status!=="completed"?"failed":""}"><b>${nice(a.stage)} · attempt ${esc(a.attempt_no)} · ${esc(a.status)}</b>${a.problems.length||a.error?`<pre>${esc(a.problems.join("\n")+(a.error?"\n"+a.error:""))}</pre>`:""}<details><summary>Raw evaluator output</summary><pre>${esc(a.raw_output||"No output recorded.")}</pre></details></div>`).join("")}</div>`).join("")+"</details>";
+}
+function extractionView(ex){
+  if(!ex)return '<p class="pending">No valid extraction is available.</p>';
+  return `<p class="muted">Selection: ${nice(ex.selection_status)}</p>`+ex.items.map(i=>`<div><b>${esc(i.name_as_written)}</b> · ${nice(i.role)}${i.rank?` · rank ${esc(i.rank)}`:""}<div class="muted">${esc(i.canonical_id)}</div><div class="quote">${esc(i.evidence)}</div></div>`).join("");
+}
+function labelsView(labels){
+  if(!labels)return '<p class="pending">No valid classification is available.</p>';
+  return '<table><thead><tr><th>Label</th><th>Result</th><th>Probability</th></tr></thead><tbody>'+Object.entries(labels).map(([key,v])=>`<tr><td>${nice(key)}</td><td>${v.choice?esc(v.choice):(v.probability>=.8?"Yes":v.probability<=.2?"No":"Uncertain")}</td><td>${pct(v.selected_probability??v.probability)}</td></tr>`).join("")+'</tbody></table><p class="muted">Probabilities are classifier outputs; thresholds still require calibration.</p>';
+}
+function render(){
+  const flags=item.flags.length?`<section class="flag"><h2>⚑ Needs attention · ${item.flags.length} signal(s)</h2><ul>${item.flags.map(f=>`<li>${nice(f)}</li>`).join("")}</ul><p>Read these signals before deciding. Proceed records your acknowledgement.</p></section>`:'<p class="ok">No automated attention flags.</p>';
+  const audit=item.audit?`<div class="card"><h2>Quality audit</h2><p class="muted">${item.audit_reasons.map(nice).join(" · ")}</p>${Object.entries(item.audit.quality).map(([key,v])=>`<h3>${nice(key)} · ${esc(v.rating)}/4</h3><p>${esc(v.rationale)}</p>${v.evidence.map(q=>`<div class="quote">${esc(q)}</div>`).join("")}`).join("")}</div>`:`<p class="muted">${item.audit_reasons.length?'Required quality audit is unavailable.':'No quality audit was required for this answer.'}</p>`;
+  const resolved=item.audit_resolution&&item.audit_resolution.status==="unavailable";
+  const blocked=resolved?`<section class="card"><h2>Quality audit unavailable · human resolved</h2><p>The automated audit failed. Its scores remain missing and both the failures and your note stay in the report.</p>${item.audit_resolution.notes.map(n=>`<p><b>${esc(n.reviewer_id)}</b>: ${esc(n.note)}</p>`).join("")}</section>`:item.blocked_reason?`<section class="flag"><h2>Evaluation ${nice(item.automatic)}</h2><p>${esc(item.blocked_reason)}</p><p>Human review: ${nice(item.state)}. Failed evaluation does not hide this answer.</p></section>`:"";
+  $("content").innerHTML=blocked+flags+`<div class="columns"><section><div class="card"><h2>Task · ${nice(item.target)} · choose ${esc(item.requested_count)}</h2>${item.task.map(m=>`<details ${m.role==="user"?"open":""}><summary>${nice(m.role)}</summary><div class="task">${esc(m.content)}</div></details>`).join("")}</div><div class="card"><h2>Candidate answer</h2><div class="answer">${esc(item.answer)}</div></div></section><section><div class="card"><h2>Preference labels & basic compliance</h2>${labelsView(item.labels)}</div><div class="card"><h2>Recommendation extraction</h2>${extractionView(item.extraction)}</div>${audit}<div class="card"><h2>Human validation</h2>${item.reviews.length?item.reviews.map(r=>`<p><b>${esc(r.reviewer_id)}</b> · ${esc(decisionLabel(r.decision))}${r.stale?" · stale; review again":""}<br>${esc(r.note)}</p>`).join(""):'<p class="muted">Awaiting your validation.</p>'}</div></section></div>`+historyView();
+  $("fullReport").hidden=!item.report_url;if(item.report_url)$("fullReport").href=item.report_url;
+  $("inspect").hidden=!(item.blocked||item.automatic==="failed")||!item.history;$("recovery").hidden=queue.scope!=="v2";
+  $("outdated").hidden=!item.outdated;buttons();
+  $("message").textContent=item.outdated?"Reload the changed evidence before deciding.":item.can_proceed_without_audit?"You can resolve the unavailable quality audit with an explicit note. Quality scores remain missing.":item.can_proceed?"If everything looks right, choose Proceed. Flags require a note.":"Required automated evaluation is pending or failed. Inspect the history or flag a concern.";
+  drawQueue();
+}
+async function load(packet){const seq=++loadSequence;try{$("error").textContent="";const next=await api("/api/item?packet="+encodeURIComponent(packet));if(seq!==loadSequence)return;item=next;$("flagForm").style.display="none";$("recoveryPanel").hidden=true;render()}catch(e){if(seq===loadSequence)$("error").textContent=e.message}}
+async function refresh(){
+  if(refreshing||busy||$("flagForm").style.display==="block")return;refreshing=true;
+  try{queue=await api("/api/queue");drawQueue();const current=item&&queue.items.find(e=>e.packet_id===item.packet_id);if(current&&current.seen&&current.seen!==item.seen){item.outdated=true;$("outdated").hidden=false;buttons()}$("live").textContent=`Updated ${new Date().toLocaleTimeString()}`;if(!item&&visibleItems().length)await load(visibleItems()[0].packet_id)}catch(e){$("error").textContent=e.message}finally{refreshing=false}
+}
+async function decide(decision){
+  if(busy||!item||item.outdated)return;
+  if(decision!=="proceed"&&!$("note").value.trim()){$("error").textContent="A note is required for this decision.";$("note").focus();return}
+  busy=true;buttons();
+  try{const prior=item.packet_id;const r=await api("/api/check",{packet_id:prior,seen:item.seen,decision,note:decision!=="proceed"?$("note").value:""});queue=r.queue;drawQueue();const next=visibleItems().find(e=>e.packet_id!==prior&&(e.state!=="approved"||e.blocked));await load(next?next.packet_id:prior);$("message").textContent=queue.done===queue.total&&!queue.counts.blocked?"All answers validated. Your decision is saved.":"Decision saved."}
+  catch(e){$("error").textContent=e.message}
+  finally{busy=false;buttons()}
+}
+$("queue").onclick=e=>{const b=e.target.closest("button[data-p]");if(b&&!busy)load(b.dataset.p)};
+$("proceed").onclick=()=>decide("proceed");
+function openNote(decision){noteDecision=decision;$("noteLabel").textContent=decision==="flag"?"What needs attention?":"Explain why you are accepting the review with its quality audit unavailable";$("noteExplanation").textContent=decision==="flag"?"Your flag will hold this item for follow-up.":"This records a human resolution of the failed audit. Its scores stay missing, and all failed attempts remain in the report.";$("saveFlag").textContent=decision==="flag"?"Save flag":"Confirm: proceed with audit unavailable";$("flagForm").style.display="block";$("note").value="";$("note").focus()}
+$("flag").onclick=()=>openNote("flag");$("proceedWithoutAudit").onclick=()=>openNote("proceed_without_audit");
+$("saveFlag").onclick=()=>decide(noteDecision);$("cancelFlag").onclick=()=>{$("flagForm").style.display="none"};
+document.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.ctrlKey&&item&&item.can_proceed&&!item.outdated&&!busy&&$("flagForm").style.display!=="block"){e.preventDefault();decide("proceed")}});
+for(const id of ["stateFilter","questionFilter","policyFilter"])$(id).onchange=drawQueue;
+$("refresh").onclick=refresh;$("reloadItem").onclick=()=>item&&load(item.packet_id);
+$("inspect").onclick=()=>{const el=$("history");if(el){el.open=true;el.scrollIntoView({behavior:"smooth",block:"start"})}};
+$("recovery").onclick=async()=>{try{const r=await api("/api/recovery?packet="+encodeURIComponent(item.packet_id));$("recoveryPanel").innerHTML=`<h2>Recovery options</h2><p>${esc(r.message)}</p>${r.command?`<details><summary>Resume command (reveals run identity)</summary><pre>${esc(r.command)}</pre></details>`:""}`;$("recoveryPanel").hidden=false}catch(e){$("error").textContent=e.message}};
+(async()=>{await refresh();if(!queue||!queue.items.length)$("content").textContent="No answers available for review yet. New v2 answers appear automatically."})();
+setInterval(()=>{if(!document.hidden)refresh()},15000);
+</script></body></html>

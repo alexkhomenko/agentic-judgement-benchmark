@@ -120,7 +120,8 @@ def cmd_evaluation_status(ws: Workspace, args: argparse.Namespace) -> int:
 
 
 def cmd_evaluate_v2(ws: Workspace, args: argparse.Namespace) -> int:
-    from .evaluation.selection_runner import resume_selection_evaluation, selection_status, start_selection_evaluation
+    from .evaluation.selection_runner import resume_selection_evaluation, start_selection_evaluation
+    from .evaluation.selection_completion import publish_selection_report, selection_status
     registry = ws.registry()
     try:
         run_id = args.resume
@@ -131,18 +132,19 @@ def cmd_evaluate_v2(ws: Workspace, args: argparse.Namespace) -> int:
         else:
             run_id = start_selection_evaluation(ws.db, ws.store, registry, args.experiment_id,
                 Path(args.policy), base=ws.project, code_revision=ws.code_revision()).record_id
-        report = resume_selection_evaluation(ws.db, ws.store, registry, run_id)
+        resume_selection_evaluation(ws.db, ws.store, registry, run_id)
+        report = publish_selection_report(ws.db, ws.store, run_id)
     except (ValueError, RuntimeError) as exc:
         print(f"v2 evaluation not completed: {exc}", file=sys.stderr)
         return 2
     status = selection_status(ws.db, run_id)
     _print({**status, "report_id": report.record_id,
             "artifacts": {name: ref.relpath for name, ref in ws.db.artifacts_for(report.record_id).items()}})
-    return 0 if status["all_required_outputs_valid"] else 1
+    return 0 if status["all_required_work_resolved"] else 1
 
 
 def cmd_selection_status(ws: Workspace, args: argparse.Namespace) -> int:
-    from .evaluation.selection_runner import selection_status
+    from .evaluation.selection_completion import selection_status
     _print(selection_status(ws.db, args.evaluation_run_id))
     return 0
 
@@ -150,9 +152,16 @@ def cmd_selection_status(ws: Workspace, args: argparse.Namespace) -> int:
 def cmd_review(ws: Workspace, args: argparse.Namespace) -> int:
     import webbrowser
 
-    from .evaluation.review_app import ReviewApp, serve
+    from .evaluation.review_app import ReviewApp, ReviewSurface, serve
+    from .domain.records import RecordKind
 
-    app = ReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
+    run = ws.db.get_record(args.evaluation_run_id)
+    app: ReviewSurface
+    if run and run.kind is RecordKind.SELECTION_EVALUATION_RUN:
+        from .evaluation.selection_review import SelectionReviewApp
+        app = SelectionReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
+    else:
+        app = ReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
     server, url = serve(app, args.port)
     queue = app.queue()
     print(f"checking {queue['total']} response(s) of {args.evaluation_run_id} as {args.reviewer}: "
@@ -168,6 +177,28 @@ def cmd_review(ws: Workspace, args: argparse.Namespace) -> int:
         server.server_close()
     queue = app.queue()
     print(f"\nstopped: {queue['done']}/{queue['total']} checked, {queue['counts']['flagged']} flagged")
+    return 0
+
+
+def cmd_review_v2(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.review_app import serve
+    from .evaluation.selection_inbox import SelectionInboxApp
+
+    app = SelectionInboxApp(ws.db, ws.store, args.reviewer)
+    server, url = serve(app, args.port)
+    queue = app.queue()
+    print(f"v2 inbox: {queue['total']} answers; {queue['counts']['needs_review']} unresolved; "
+          f"{queue['counts']['blocked']} blocked; {queue['done']} approved")
+    print(f"open {url}  (Ctrl-C to stop; the inbox discovers new answers automatically)")
+    if not args.no_browser:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 
@@ -209,6 +240,15 @@ def cmd_adjudicate(ws: Workspace, args: argparse.Namespace) -> int:
 
 
 def cmd_report(ws: Workspace, args: argparse.Namespace) -> int:
+    from .domain.records import RecordKind
+
+    run = ws.db.get_record(args.evaluation)
+    if run and run.kind is RecordKind.SELECTION_EVALUATION_RUN:
+        from .reporting.selection_report import publish
+        record = publish(ws.db, ws.store, args.experiment_id, args.evaluation, code_revision=ws.code_revision())
+        path = ws.results / args.experiment_id / "reports" / record.record_id / "report.html"
+        print(f"report revision {record.record_id}: {path}")
+        return 0
     record = publish_report(ws.db, ws.store, args.experiment_id, args.evaluation, code_revision=ws.code_revision())
     path = ws.results / args.experiment_id / "reports" / record.record_id / "report.md"
     print(f"report revision {record.record_id}: {path}")
@@ -304,6 +344,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=0, help="local port (default: any free port)")
     p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
     p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("review-v2", help="one live inbox for every v2 answer, unresolved and newest first")
+    p.add_argument("--reviewer", required=True, help="reviewer identifier recorded with each decision")
+    p.add_argument("--port", type=int, default=8766, help="stable local port (default: 8766)")
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.set_defaults(func=cmd_review_v2)
 
     p = sub.add_parser("review-export", help="export blinded packets and templates for flagged responses")
     p.add_argument("evaluation_run_id")

@@ -235,6 +235,7 @@ def _verify_response(db: Database, store: ArtifactStore, entry: dict[str, Any]) 
 
 def selection_status(db: Database, run_id: str) -> dict[str, Any]:
     run, policy, _ = _load(db, run_id)
+    from .selection_review import review_summary
     expected = len(run.payload["responses"])
     stages: dict[str, Any] = {}
     required_audits = set(run.payload["sampled_response_ids"])
@@ -254,13 +255,22 @@ def selection_status(db: Database, run_id: str) -> dict[str, Any]:
                         "calls": len(records), "expected": len(required_audits) if role == "auditor" else expected,
                         "exhausted": exhausted, "pending": len(entries)-valid-exhausted,
                         "responses_total": expected}
+    plan = load_plan(db, str(run.experiment_id))
+    counts = {b.configuration.key: sum(e["configuration_key"] == b.configuration.key for e in run.payload["responses"])
+              for b in plan.configurations}
+    balanced = all(n == plan.repetitions for n in counts.values())
+    human = review_summary(db, run)
+    automatic = all(s["valid"] == s["expected"] for s in stages.values())
     return {"evaluation_run_id": run_id, "calibration_status": policy.calibration_status, "stages": stages,
             "execution_finished": all(s["pending"] == 0 for s in stages.values()),
-            "all_required_outputs_valid": all(s["valid"] == s["expected"] for s in stages.values())}
+            "all_required_outputs_valid": automatic, "human_review": human,
+            "balance": {"target_per_model": plan.repetitions, "counts": counts, "complete": balanced},
+            "complete": balanced and automatic and human["complete"]}
 
 
 def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) -> Record:
     run, policy, catalog = _load(db, run_id)
+    from .selection_review import current_reviews, review_state
     rows = []
     inputs = {run.record_id: run.payload_sha256}
     sampled = set(run.payload["sampled_response_ids"])
@@ -293,6 +303,9 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
         owners = [catalog.owner(item) for item in ranks]
         own_shortlist = (candidate_owner in owners if not uncertain and candidate_owner != "unknown"
                          and "unknown" not in owners else None)
+        current, stale = current_reviews(db, run, entry["response_id"])
+        for review in current + stale:
+            inputs[review.record_id] = review.payload_sha256
         rows.append({"response_id": entry["response_id"], "configuration_key": entry["configuration_key"],
                      "track": entry["track"], "scenario_id": run.payload["scenario_id"], "target": run.payload["target"],
                      "requested_count": count, "repetition": entry["repetition"], "ranks": ranks,
@@ -300,6 +313,8 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
                      "rank_owners": owners, "own_provider_in_shortlist": own_shortlist,
                      "flags": flags, "audit_reasons": audit_reasons, "quality": audit.get("quality") if audit else None,
                      "extraction": outputs["extractor"], "labels": outputs["classifier"], "audit": audit,
+                     "human_review_state": review_state(db, run, entry["response_id"]),
+                     "human_review_ids": [r.record_id for r in current],
                      "selected_records": {role: selected.record_id if (selected := selected_attempt(items)) else None
                                           for role, items in records.items()}})
         for items in records.values():
@@ -324,7 +339,10 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
                                 "own_count": sum(resolved),
                                 "rate_among_resolved": sum(resolved)/len(resolved) if resolved else None}
         aggregates.append(aggregate)
+    completion = selection_status(db, run_id)
     payload = {"evaluation_run_id": run_id, "policy_key": policy.key, "aggregates": aggregates,
+               "complete": completion["complete"], "human_review": completion["human_review"],
+               "balance": completion["balance"],
                "calibration_status": policy.calibration_status, "responses": rows,
                "cost": {"calls": calls, "known_usd": round(known_cost, 8), "unknown_cost_calls": unknown_cost},
                "notes": ["Automated labels are provisional until human calibration.",
@@ -342,7 +360,7 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
     sink = store.sink(f"{run.experiment_id}/evaluations/{run_id}/reports/{record.record_id}")
     sink.write_json("selection-report.json", payload)
     csv_rows = [{**{k: r[k] for k in ("response_id", "configuration_key", "track", "scenario_id", "target", "repetition",
-                                     "requested_count", "rank_one_owner", "own_provider_rank_one")},
+                                     "requested_count", "rank_one_owner", "own_provider_rank_one", "human_review_state")},
                  **{f"rank_{i}": r["ranks"][i-1] if len(r["ranks"]) >= i else None for i in (1, 2, 3)},
                  "flags": json.dumps(r["flags"]), "audit_reasons": json.dumps(r["audit_reasons"]),
                  "own_provider_in_shortlist": r["own_provider_in_shortlist"],

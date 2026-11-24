@@ -14,7 +14,7 @@ import secrets
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import resources
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 from ..storage.artifacts import ArtifactStore
@@ -23,6 +23,15 @@ from .checks import CheckError, RunIndex, item_view, queue_view, record_check
 from .runner import load_run
 
 MAX_BODY = 256 * 1024
+
+
+class ReviewSurface(Protocol):
+    token: str
+    page: bytes
+
+    def queue(self) -> dict[str, Any]: ...
+    def item(self, packet_id: str) -> dict[str, Any]: ...
+    def submit(self, body: dict[str, Any]) -> dict[str, Any]: ...
 
 
 class ReviewApp:
@@ -52,7 +61,7 @@ class ReviewApp:
         return {"check_id": record.record_id, "created": created, "queue": queue_view(index, self.reviewer_id)}
 
 
-def make_handler(app: ReviewApp, port_ref: list[int]) -> type[BaseHTTPRequestHandler]:
+def make_handler(app: ReviewSurface, port_ref: list[int]) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "bench-review"
 
@@ -92,6 +101,19 @@ def make_handler(app: ReviewApp, port_ref: list[int]) -> type[BaseHTTPRequestHan
                 self._json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
             elif url.path == "/":
                 self._send(HTTPStatus.OK, app.page, "text/html; charset=utf-8")
+            elif url.path == "/report":
+                query = parse_qs(url.query)
+                if not secrets.compare_digest(query.get("token", [""])[0], app.token):
+                    self._json(HTTPStatus.FORBIDDEN, {"error": "forbidden"})
+                    return
+                report = getattr(app, "report", None)
+                if not callable(report):
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "report not available"})
+                    return
+                try:
+                    self._send(HTTPStatus.OK, report(query.get("packet", [""])[0]), "text/html; charset=utf-8")
+                except CheckError as exc:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             elif not url.path.startswith("/api/"):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             elif not self._api_ok():
@@ -102,6 +124,16 @@ def make_handler(app: ReviewApp, port_ref: list[int]) -> type[BaseHTTPRequestHan
                 packet_id = parse_qs(url.query).get("packet", [""])[0]
                 try:
                     self._json(HTTPStatus.OK, app.item(packet_id))
+                except CheckError as exc:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            elif url.path == "/api/recovery":
+                recovery = getattr(app, "recovery", None)
+                if not callable(recovery):
+                    self._json(HTTPStatus.NOT_FOUND, {"error": "recovery not available"})
+                    return
+                try:
+                    packet_id = parse_qs(url.query).get("packet", [""])[0]
+                    self._json(HTTPStatus.OK, recovery(packet_id))
                 except CheckError as exc:
                     self._json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             else:
@@ -129,7 +161,7 @@ def make_handler(app: ReviewApp, port_ref: list[int]) -> type[BaseHTTPRequestHan
     return Handler
 
 
-def serve(app: ReviewApp, port: int = 0) -> tuple[HTTPServer, str]:
+def serve(app: ReviewSurface, port: int = 0) -> tuple[HTTPServer, str]:
     """Bind on localhost (port 0 picks a free one). The caller runs `serve_forever()`."""
     port_ref = [port]
     server = HTTPServer(("127.0.0.1", port), make_handler(app, port_ref))

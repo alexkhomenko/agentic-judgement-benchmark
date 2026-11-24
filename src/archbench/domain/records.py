@@ -31,6 +31,8 @@ class RecordKind(StrEnum):
     SELECTION_EXTRACTION = "selection_extraction"
     SELECTION_AUDIT = "selection_audit"
     SELECTION_REPORT = "selection_report"
+    SELECTION_HUMAN_REVIEW = "selection_human_review"
+    SELECTION_REVIEWED_REPORT = "selection_reviewed_report"
     CAMPAIGN = "campaign"
     CAMPAIGN_TARGET = "campaign_target"
     CAMPAIGN_CELL = "campaign_cell"

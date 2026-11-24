@@ -312,6 +312,61 @@ Use `bench evaluate <exp> --resume <evaluation-run>` to continue an interrupted 
 - Corrections create superseding records. Reports name exact record IDs, are reproducible, never mix
   evaluation runs or policies, and say when they are incomplete.
 
+## V2 one-answer slice
+
+Use one shared inbox for all v2 answers:
+
+```sh
+bench review-v2 --reviewer alexander --port 8766 --no-browser
+```
+
+Open `http://127.0.0.1:8766/`. The inbox discovers existing and new v2 answers from the results database,
+including answers awaiting evaluation. Unresolved items come first, newest evidence first within each group;
+approved items remain below. The page refreshes its queue every 15 seconds without replacing an answer or
+an unsaved flag note while you are reviewing it. Filters cover human status, blocked evaluations, question,
+and active evaluation policy. Human-review status and automated readiness are displayed separately.
+
+Each generated answer appears once. Its newest evaluation is active, and earlier evaluation versions and
+reviews remain in the item's history. A new evaluation requires a new review; old approvals never silently
+transfer. Existing approvals against unchanged evidence carry over. New evidence prompts an explicit reload
+before saving a decision. The inbox provides failure details, recovery guidance and a full report link;
+opening the report deliberately reveals candidate identity. Browsing, filtering and reviewing make no model
+calls. Missing preference/compliance labels continue to block approval. If only the required quality audit
+has exhausted its retries, **Proceed with audit unavailable** provides an explicit human resolution and
+requires a note. The audit failures remain recorded and its quality scores remain missing. Such an item
+can count as reviewed and its run can complete once coverage is balanced and all other work is resolved;
+the reports still state that automatic outputs were not all valid.
+
+The pilot configuration `configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml` runs one
+independent personal-agent provider question on the pinned local MLX Qwen 3.5 9B checkpoint.
+
+```sh
+bench qualify configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml
+bench plan configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml
+bench run agentic-design-bias-v2-slice-mlx-qwen-001
+bench evaluate-v2 agentic-design-bias-v2-slice-mlx-qwen-001
+bench review <selection-evaluation-run> --reviewer alexander
+bench selection-status <selection-evaluation-run>
+bench report agentic-design-bias-v2-slice-mlx-qwen-001 --evaluation <selection-evaluation-run>
+```
+
+V2 review shows the answer, Luna's extracted recommendations, Jev's preference and compliance labels,
+and any Haiku quality audit. Automated flags appear explicitly above the answer. **Proceed** is the primary
+action; it requires a human click (or Ctrl+Enter). **Flag for follow-up** requires a note and blocks completion
+until resolved. Opening the page never approves an answer. Each decision is append-only and records the
+exact evidence seen; changed evaluation evidence makes the decision stale. Reports and `selection-status`
+require balanced candidate coverage, valid preference/compliance outputs, a valid or explicitly human-resolved
+quality audit where required, and human approval of every answer
+before reporting completion. This pilot covers only its one-model, one-question plan, not the full v2 roster.
+
+For v2, `bench report` writes a self-contained `report.html`, a Markdown version, `report.json`, and an
+input manifest under `results/<experiment>/reports/<revision>/`. The report includes full answers, every
+evaluation attempt (including failed outputs and retries), human validation, measured runtime and API cost,
+qualification checks, exact model settings, and evidence hashes. Reporting makes no model calls.
+Reviewed report revisions record the human review policy separately from the frozen automatic judging
+policy. The original automatic reports and attempts remain immutable. Human audit resolutions become
+stale when evaluation evidence changes and must then be reviewed again.
+
 ## Open calibration decisions
 
 Thresholds in `configs/evaluation/default.yaml` and `rubrics/` are drafts: acceptable-response score,

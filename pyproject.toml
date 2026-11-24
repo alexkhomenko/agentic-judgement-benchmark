@@ -27,7 +27,7 @@ bench = "archbench.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-archbench = ["evaluation/review_app.html"]
+archbench = ["evaluation/review_app.html", "evaluation/selection_review.html"]
 
 [tool.mypy]
 strict = true
