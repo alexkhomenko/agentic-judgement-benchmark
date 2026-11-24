@@ -261,6 +261,25 @@ supersedes the earlier record. A check names the judge and extraction records it
 example a judge that was missing completes on resume), the check goes stale and the response needs another
 check. Adjudication waits until every response is checked and every blocking flag is fully reviewed.
 
+### Cross-model report
+
+`bench cross-report` compares models across evaluation runs as one static, self-contained HTML file (inline CSS and
+SVG, no scripts or external requests), ready to publish anywhere:
+
+```sh
+bench cross-report evr-69fa320525c64c75 evr-13ec817f41224e4f evr-e112dca0a93f4022 \
+    evr-30111b46b2124cab evr-2850fdb90275448c \
+    --scenarios scenarios/agentic-design-bias --out results/published/agentic-design-bias.html
+```
+
+Name one evaluation run per probe and model; a second run covering the same pair is rejected rather than merged.
+For each probe the page shows which vendor each model recommends first, self-preference against a baseline pooled
+from every other vendor's model on that probe, rubric quality and per-dimension ratings, and a coverage grid that
+also lists answers no included run evaluates. Quality is the adjudicated score where one exists, otherwise the
+judges' mean, marked provisional. The page lists every run, policy, judge, extractor and catalog it used, embeds
+the aggregated data as JSON, and states its caveats (unchecked judgements, judges sharing a candidate's vendor,
+mixed policies, draft catalog, sample size).
+
 Use `bench evaluate <exp> --resume <evaluation-run>` to continue an interrupted evaluation and
 `bench evaluation-status <evaluation-run>` to see stage coverage. Results go to `results/` by default
 (`--results` to change it).

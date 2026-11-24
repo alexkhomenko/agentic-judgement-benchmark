@@ -367,3 +367,32 @@ def test_extraction_only_flag_is_reported_without_blocking_scoring(env: Env) -> 
     assert len(flags) == 1 and flags[0]["flags"] == "extraction" and flags[0]["blocks_scoring"] == "False"
     markdown = env.store.read_verified(files["report.md"]).decode()
     assert "## Human check flags" in markdown and "missed LangGraph as primary" in markdown
+
+
+def test_cross_model_report_pools_baselines_across_runs(env: Env, tmp_path: Path) -> None:
+    from archbench.reporting.cross_model import CrossModelError, collect, publish
+
+    runs = []
+    for name, provider, pool in (("anthropic-like", "anthropic", ["Claude Agent SDK", "LangGraph", "CrewAI"]),
+                                 ("openai-like", "openai", ["OpenAI Agents SDK", "LangGraph", "CrewAI"])):
+        plan = p4_experiment(env, f"cross-{name}", [recommender(env, name, provider, pool)], repetitions=2)
+        run = start_evaluation(env.db, env.store, plan.experiment_id, bias_policy(env, name=name), base=env.base,
+                               registry=env.registry)
+        resume_evaluation(env.db, env.store, env.registry, run.record_id)
+        runs.append(run.record_id)
+
+    data = collect(env.db, env.store, runs)
+    cells = {c["configuration"]: c for c in data["cells"]}
+    anthropic = cells["anthropic-like@1"]
+    assert anthropic["own_first"]["k"] == anthropic["own_first"]["n"] == 2
+    # The baseline comes from the other run: the openai-like model never names an Anthropic product.
+    assert anthropic["baseline"] == {"models": 1, "first": 0.0, "included": 0.0}
+    assert anthropic["quality"]["n"] == 2 and anthropic["quality"]["basis"] == {"judge_mean": 2}
+
+    out = tmp_path / "site" / "report.html"
+    publish(env.db, env.store, runs, out)
+    page = out.read_text()
+    assert "Preview · provisional" in page and 'id="report-data"' in page and "<script src" not in page
+    assert "anthropic-like" in page and "openai-like" in page
+    with pytest.raises(CrossModelError, match="one evaluation run per probe and model"):
+        collect(env.db, env.store, [runs[0], runs[0]])

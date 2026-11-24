@@ -187,6 +187,20 @@ def cmd_report(ws: Workspace, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cross_report(ws: Workspace, args: argparse.Namespace) -> int:
+    from .reporting.cross_model import CrossModelError, publish
+
+    scenarios = (ws.project / args.scenarios) if args.scenarios else None
+    try:
+        data = publish(ws.db, ws.store, args.evaluation_run_ids, Path(args.out), scenarios=scenarios, title=args.title)
+    except CrossModelError as exc:
+        print(f"cross-model report not written: {exc}", file=sys.stderr)
+        return 2
+    models = len({c["configuration"] for c in data["cells"]})
+    print(f"wrote {args.out}: {models} model(s), {len(data['runs'])} evaluation run(s), data {data['data_sha256'][:16]}")
+    return 0
+
+
 def cmd_inspect(ws: Workspace, args: argparse.Namespace) -> int:
     attempt = ws.db.get_attempt(args.attempt_id)
     task = ws.db.get_task(attempt.task_id)
@@ -272,6 +286,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("experiment_id")
     p.add_argument("--evaluation", required=True)
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("cross-report", help="write a static HTML report comparing models across evaluation runs")
+    p.add_argument("evaluation_run_ids", nargs="+", help="one evaluation run per probe and model")
+    p.add_argument("--out", required=True, help="HTML file to write")
+    p.add_argument("--scenarios", help="probe family directory, to list probes that have no answers yet")
+    p.add_argument("--title", default="Agentic design bias")
+    p.set_defaults(func=cmd_cross_report)
 
     p = sub.add_parser("inspect", help="inspect one invocation attempt")
     p.add_argument("attempt_id")
