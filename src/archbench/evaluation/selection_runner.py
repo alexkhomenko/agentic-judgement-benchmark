@@ -26,13 +26,13 @@ from ..planning.provenance import dependency_versions
 from ..storage.artifacts import ArtifactStore
 from ..storage.database import Database
 from .invocations import EvaluationCall, Parser, next_attempt, recover_orphans, run_call
-from .judging import evaluation_messages
 from .records import selected_attempt
 from .runner import EvaluationPreflightError, FrozenModel, _freeze_model, _thaw_model
 from .selection import (
     SELECTION_AUDIT_OUTPUT_FORMAT,
     SelectionCatalog, SelectionPolicy, Target, audit_flags, jev_questions,
-    label_ranks, parse_labels, parse_selection, ranked_ids, sample_audits, scenario_selection,
+    label_ranks, parse_labels, parse_selection, ranked_ids, retry_feedback, sample_audits, scenario_selection,
+    selection_messages,
 )
 
 STAGES = {
@@ -40,7 +40,8 @@ STAGES = {
     "classifier": (RecordKind.SELECTION_LABELS, "selection-labels", "classification"),
     "auditor": (RecordKind.SELECTION_AUDIT, "selection-audits", "judge"),
 }
-CODE_REVISION = "selection-evaluation-v2.2"  # v2.2: schema-enforced audit, quote-mark-insensitive evidence
+CODE_REVISION = "selection-evaluation-v2.3"  # v2.3: task/answer as separate plain-text elements, retry feedback
+# v2.2: schema-enforced audit, quote-mark-insensitive evidence
 
 
 def _code_hashes() -> dict[str, str]:
@@ -159,7 +160,9 @@ def _run_stage(db: Database, store: ArtifactStore, registry: AdapterRegistry, ru
                policy: SelectionPolicy, role: str, entry: dict[str, Any], model: FrozenModel,
                messages: tuple[Message, ...], parser: Parser,
                dependencies: list[Record], *, before_call: Callable[[], None] | None = None,
-               checkpoint: bool = False, retry_uncertain: bool = False) -> dict[str, Any] | None:
+               checkpoint: bool = False, retry_uncertain: bool = False,
+               feedback: bool = False) -> dict[str, Any] | None:
+    """Run one stage's bounded attempts. With feedback, a retry after a rejected output carries the reasons."""
     records = _records(db, run, role, entry["response_id"])
     kind, dirname, purpose = STAGES[role]
     # Resource failures are checkpoints, not a permanent consumption of the retry allowance.
@@ -180,12 +183,18 @@ def _run_stage(db: Database, store: ArtifactStore, registry: AdapterRegistry, ru
         reopen = False
         if before_call:
             before_call()
+        call_messages, rejected_inputs = messages, {}
+        rejected = next((r for r in reversed(records) if r.payload.get("status") == "invalid_output"), None)
+        if feedback and rejected is not None:
+            call_messages = retry_feedback(messages, rejected.payload)
+            rejected_inputs = {rejected.record_id: rejected.payload_sha256}
         call = EvaluationCall(kind=kind, prefix="sel", dirname=dirname, purpose=purpose,  # type: ignore[arg-type]
                               experiment_id=str(run.experiment_id), run_id=run.record_id,
                               subject_id=entry["response_id"], keys={"stage": role}, round=1,
-                              config=model.configuration, messages=messages,
+                              config=model.configuration, messages=call_messages,
                               inputs={run.record_id: run.payload_sha256, entry["response_id"]: entry["final_answer_sha256"],
-                                      **model.record_inputs, **{r.record_id: r.payload_sha256 for r in dependencies}},
+                                      **model.record_inputs, **{r.record_id: r.payload_sha256 for r in dependencies},
+                                      **rejected_inputs},
                               policy_revision=f"{policy.key}/{role}", parse=parser)
         record = run_call(db, store, registry, call, attempt)
         records.append(record)
@@ -210,10 +219,10 @@ def resume_selection_evaluation(db: Database, store: ArtifactStore, registry: Ad
         for entry in run.payload["responses"]:
             _verify_response(db, store, entry)
             packet = entry["packet"]
-            extraction_packet = {**packet, "catalog": catalog.visible(target)}
+            visible = catalog.visible(target)
             extraction = stage(db, store, registry, run, policy, "extractor", entry, models["extractor"],
-                evaluation_messages(models["extractor"].prompt, "selection_packet", extraction_packet),
-                partial(parse_selection, packet=packet, catalog=catalog, target=target), [])
+                selection_messages(models["extractor"].prompt, packet, visible),
+                partial(parse_selection, packet=packet, catalog=catalog, target=target), [], feedback=True)
             questions = jev_questions(models["classifier"].prompt, catalog, target, count, extraction,
                                       ordering_key=entry["final_answer_sha256"], seed=policy.choice_seed)
             messages = (Message(role=Role.SYSTEM, content=json.dumps({"questions": questions})),
@@ -223,9 +232,10 @@ def resume_selection_evaluation(db: Database, store: ArtifactStore, registry: Ad
             flags = audit_flags(extraction, labels, count, policy, truncated=entry["truncated"])
             if flags or entry["response_id"] in sampled:
                 stage(db, store, registry, run, policy, "auditor", entry, models["auditor"],
-                    evaluation_messages(models["auditor"].prompt, "selection_packet", extraction_packet),
+                    selection_messages(models["auditor"].prompt, packet, visible),
                     partial(parse_selection, packet=packet, catalog=catalog, target=target, audit=True),
-                    _records(db, run, "extractor", entry["response_id"]) + _records(db, run, "classifier", entry["response_id"]))
+                    _records(db, run, "extractor", entry["response_id"]) + _records(db, run, "classifier", entry["response_id"]),
+                    feedback=True)
         return publish_selection_report(db, store, run_id)
 
 
