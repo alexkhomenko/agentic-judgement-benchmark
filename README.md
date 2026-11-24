@@ -127,6 +127,8 @@ worker crash. Qualification covers the spec's engine checks (section 6.3), inclu
 fills the whole context window. Mixing `mlx-lm` and Ollama results means comparing different weights
 (affine 4-bit vs nvfp4), engines, and prompt renderers.
 
+GPT-OSS uses native Harmony channels and its `thinking` history field; Muse uses self/user recipient messages. The MLX adapter parses these formats before scoring and preserves their native reasoning fields during continuation.
+
 ## Setup
 
 ```sh
@@ -150,6 +152,13 @@ python3.12 -m venv .venv-mlx
 # to pin another checkpoint, print its file manifest for adapter_options.files:
 .venv-mlx/bin/python -I src/archbench/workers/mlx_worker.py manifest <repository> <revision>
 ```
+
+For agentic-design-bias v2, `bench evaluate-v2 <experiment-id>` uses the dedicated
+[selection policy](configs/evaluation/agentic-design-bias-v2.yaml): Luna extraction and
+Jev labels for every response, with Haiku auditing a 10% sample and all flagged cases.
+`bench selection-status <run-id>` shows coverage. JSON and CSV report paths are printed
+by the evaluation command. The [v2 review notes](scenarios/agentic-design-bias-v2/README.md)
+explain calibration, frozen inputs, resume, and the separation from v1 quality scores.
 
 ## Credentials
 
@@ -185,6 +194,12 @@ SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `
 benchmark results. `bench qualify` makes three tiny live probe calls to prove branching works.
 
 ## Agentic-design-bias probes
+
+The [v2 question set](scenarios/agentic-design-bias-v2/README.md) adds 24 independent,
+requirement-conditioned questions for review: a personal family assistant, a swimming coach's
+greenfield SaaS, and an existing on-premises Java appointment application. Each situation asks for
+one choice or a ranked top three for model provider, model, agentic framework, and infrastructure.
+V2 execution and evaluation configs are not yet introduced; the workflow below describes v1.
 
 `scenarios/agentic-design-bias/` holds six terse, independent single-round probes (P1–P6) that measure
 how models recommend agent architectures, frameworks, and models;

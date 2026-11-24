@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 import yaml
 
-from archbench.adapters.base import AdapterError, InvocationContext, QualificationRequirements
+from archbench.adapters.base import AdapterError, InvocationContext, NativeExecution, QualificationRequirements
 from archbench.adapters.fake import FakeAdapter
 from archbench.adapters.fake_judge import FakeJudgeAdapter
 from archbench.adapters.local.mlx_lm import REQUIRED, MlxLmAdapter, split_thinking, thinking_block_opened
@@ -337,6 +337,41 @@ def test_disabled_thinking_is_a_template_kwarg_and_yields_no_reasoning(tmp_path:
 ])
 def test_split_thinking_follows_the_chat_template(text: str, opened: bool, expected: tuple[Any, str]) -> None:
     assert split_thinking(text, {"think_start": "<think>", "think_end": "</think>"}, opened) == expected
+
+
+@pytest.mark.parametrize(("fmt", "text", "expected"), [
+    ("harmony", "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>answer",
+     ("plan", "answer")),
+    ("harmony", "<|channel|>final<|message|>answer", (None, "answer")),
+    ("harmony", "<|channel|>analysis<|message|>unfinished", ("unfinished", "")),
+    ("harmony", "<|channel|>commentary<|message|>working<|end|>", (None, "")),
+    ("muse", " to=self<|message|>plan<|eom|><|start|>assistant to=user<|message|>answer", ("plan", "answer")),
+    ("muse", " to=user<|message|>answer", (None, "answer")),
+    ("muse", "<|message|>answer", (None, "answer")),
+    ("muse", " to=self<|message|>unfinished", ("unfinished", "")),
+    ("muse", "unrecognized output", (None, "")),
+])
+def test_native_channel_formats_keep_reasoning_out_of_answers(fmt: str, text: str,
+                                                             expected: tuple[Any, str]) -> None:
+    tokenizer = {"response_format": fmt}
+    assert split_thinking(text, tokenizer, False) == expected
+    assert thinking_block_opened({"completion_text": text}, tokenizer) is (expected[0] is not None)
+
+
+def test_harmony_replay_uses_the_checkpoints_thinking_field() -> None:
+    mlx = adapter()
+    prepared = mlx.prepare(CONFIG, MESSAGES, None, ctx())
+    execution = NativeExecution(status="completed", native_response={
+        "completion_text": "<|channel|>analysis<|message|>plan<|end|><|start|>assistant<|channel|>final<|message|>answer",
+        "worker": {"tokenizer": {"response_format": "harmony"}}})
+    snapshot = mlx.fork_state(prepared, execution, mlx.extract(execution))
+    assert snapshot.native_state["messages"][-1] == {"role": "assistant", "content": "answer", "thinking": "plan"}
+
+
+def test_documented_native_thinking_off_does_not_require_nonempty_reasoning() -> None:
+    config = with_param("enable_thinking", {"state": "omitted", "documented_default": False})
+    report = adapter(template_opens_thinking=False, model_thinks=False).qualify(config, REQUIREMENTS)
+    assert report.passed, report.checks
 
 
 @pytest.mark.parametrize(("data", "opened"), [

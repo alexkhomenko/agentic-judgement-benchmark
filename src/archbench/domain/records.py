@@ -26,6 +26,16 @@ class RecordKind(StrEnum):
     ARCHITECTURE_CLASSIFICATION = "architecture_classification"
     RECOMMENDATION_EXTRACTION = "recommendation_extraction"
     REPORT_REVISION = "report_revision"
+    SELECTION_EVALUATION_RUN = "selection_evaluation_run"
+    SELECTION_LABELS = "selection_labels"
+    SELECTION_EXTRACTION = "selection_extraction"
+    SELECTION_AUDIT = "selection_audit"
+    SELECTION_REPORT = "selection_report"
+    CAMPAIGN = "campaign"
+    CAMPAIGN_TARGET = "campaign_target"
+    CAMPAIGN_CELL = "campaign_cell"
+    CAMPAIGN_REVIEW = "campaign_review"
+    CAMPAIGN_REPORT = "campaign_report"
 
 
 class Record(Frozen):

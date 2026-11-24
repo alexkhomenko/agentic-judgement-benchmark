@@ -119,6 +119,34 @@ def cmd_evaluation_status(ws: Workspace, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate_v2(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.selection_runner import resume_selection_evaluation, selection_status, start_selection_evaluation
+    registry = ws.registry()
+    try:
+        run_id = args.resume
+        if run_id:
+            run = ws.db.get_record(run_id)
+            if run is None or run.experiment_id != args.experiment_id:
+                raise ValueError("resume run does not belong to the requested experiment")
+        else:
+            run_id = start_selection_evaluation(ws.db, ws.store, registry, args.experiment_id,
+                Path(args.policy), base=ws.project, code_revision=ws.code_revision()).record_id
+        report = resume_selection_evaluation(ws.db, ws.store, registry, run_id)
+    except (ValueError, RuntimeError) as exc:
+        print(f"v2 evaluation not completed: {exc}", file=sys.stderr)
+        return 2
+    status = selection_status(ws.db, run_id)
+    _print({**status, "report_id": report.record_id,
+            "artifacts": {name: ref.relpath for name, ref in ws.db.artifacts_for(report.record_id).items()}})
+    return 0 if status["all_required_outputs_valid"] else 1
+
+
+def cmd_selection_status(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.selection_runner import selection_status
+    _print(selection_status(ws.db, args.evaluation_run_id))
+    return 0
+
+
 def cmd_review(ws: Workspace, args: argparse.Namespace) -> int:
     import webbrowser
 
@@ -259,6 +287,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("evaluation-status", help="show stage coverage for an evaluation run")
     p.add_argument("evaluation_run_id")
     p.set_defaults(func=cmd_evaluation_status)
+
+    p = sub.add_parser("evaluate-v2", help="Luna extraction, Jev preference labels, sampled/flagged Haiku audits")
+    p.add_argument("experiment_id")
+    p.add_argument("--policy", default="configs/evaluation/agentic-design-bias-v2.yaml")
+    p.add_argument("--resume", metavar="EVALUATION_RUN_ID")
+    p.set_defaults(func=cmd_evaluate_v2)
+
+    p = sub.add_parser("selection-status", help="show v2 preference-label evaluation coverage")
+    p.add_argument("evaluation_run_id")
+    p.set_defaults(func=cmd_selection_status)
 
     p = sub.add_parser("review", help="open the review app: check every response's judgement, approve or flag it")
     p.add_argument("evaluation_run_id")

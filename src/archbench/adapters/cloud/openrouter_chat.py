@@ -48,6 +48,7 @@ Configuration parameters (all others are rejected at qualification):
     reasoning_effort   explicit or omitted  -> reasoning.effort
     temperature, top_p, top_k, presence_penalty   explicit or omitted -> same names
 adapter_options:
+    provider_endpoint: optional vendor endpoint slug with suffix, e.g. alibaba/us-east-1; must belong to vendor
     endpoint_model: OpenRouter's endpoint label, e.g. qwen4-max-20261115 (required; listing name, routing metadata)
     upstream_model: the vendor's model id OpenRouter forwards, from the debug echo (required; may differ from the
                     label: Qwen4-Max is forwarded as the moving `qwen4-max` alias)
@@ -184,6 +185,10 @@ class OpenRouterAdapter:
         endpoint_model = config.adapter_options.get("endpoint_model")
         if route is None or ":" in config.model:
             return QualificationCheck(name="model_identity", passed=False, detail="no allowed route"), None
+        try:
+            selected_slug = _route_slug(config, route)
+        except AdapterError as exc:
+            return QualificationCheck(name="model_identity", passed=False, detail=str(exc)), None
         for option in ("endpoint_model", "upstream_model"):
             if not isinstance(config.adapter_options.get(option), str) or not config.adapter_options.get(option):
                 return QualificationCheck(name="model_identity", passed=False,
@@ -207,6 +212,8 @@ class OpenRouterAdapter:
         data = response.json().get("data") or {}
         endpoints = [e for e in data.get("endpoints") or [] if isinstance(e, dict)]
         ours = [e for e in endpoints if str(e.get("tag") or "").split("/")[0] == route.slug]
+        if selected_slug != route.slug:
+            ours = [e for e in ours if e.get("tag") == selected_slug]
         problems: list[str] = []
         if data.get("id") != config.model:
             problems.append(f"endpoints list is for {data.get('id')!r}, not {config.model!r}")
@@ -412,7 +419,8 @@ class OpenRouterAdapter:
                 body[name] = value
         if (effort := explicit(config, "reasoning_effort")) is not None:
             body["reasoning"] = {"effort": effort}
-        body["provider"] = {"only": [route.slug], "allow_fallbacks": False, "require_parameters": True}
+        body["provider"] = {"only": [_route_slug(config, route)], "allow_fallbacks": False,
+                            "require_parameters": True}
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -552,6 +560,18 @@ class OpenRouterAdapter:
 def _wire_parameters(config: ModelConfiguration) -> list[str]:
     names = ["max_tokens"] + [n for n in SAMPLING if explicit(config, n) is not None]
     return names + (["reasoning"] if explicit(config, "reasoning_effort") is not None else [])
+
+
+def _route_slug(config: ModelConfiguration, route: Route) -> str:
+    """A suffixed slug targets one vendor endpoint; a bare slug matches every vendor endpoint."""
+    endpoint = config.adapter_options.get("provider_endpoint")
+    if endpoint is None:
+        return route.slug
+    if (not isinstance(endpoint, str) or not endpoint.startswith(route.slug + "/")
+            or re.fullmatch(r"[a-z0-9-]+(?:/[a-z0-9-]+)+", endpoint) is None):
+        raise AdapterError(FailureKind.INVALID_STATE,
+                           f"provider_endpoint must be a suffixed endpoint of {route.slug!r}")
+    return endpoint
 
 
 def _parameter_check(config: ModelConfiguration) -> QualificationCheck:

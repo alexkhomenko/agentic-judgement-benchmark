@@ -388,6 +388,37 @@ def test_qualification_rejects_a_second_alibaba_endpoint() -> None:
     assert checks["model_identity"].passed is False and "found 2" in checks["model_identity"].detail
 
 
+def test_endpoint_pin_selects_one_of_multiple_vendor_routes() -> None:
+    config = CONFIG.model_copy(update={"adapter_options": {**CONFIG.adapter_options,
+                                                          "provider_endpoint": "alibaba/us-east-1"}})
+    listing = endpoints()
+    listing["data"]["endpoints"].append({**listing["data"]["endpoints"][0], "tag": "alibaba/us-east-1"})
+    mock = MockOpenRouter(listing=listing)
+    report = mock.adapter().qualify(config, REQUIREMENTS)
+    assert report.passed, report.checks
+    assert report.probes[0]["endpoint"]["tag"] == "alibaba/us-east-1"
+    for request in mock.requests:
+        if request.method == "POST":
+            assert json.loads(request.content)["provider"] == {
+                "only": ["alibaba/us-east-1"], "allow_fallbacks": False, "require_parameters": True}
+    missing = MockOpenRouter(listing=endpoints())
+    check, _ = missing.adapter()._model_check(config, [])
+    assert check.passed is False and "found 0" in check.detail
+    assert all(request.method == "GET" for request in missing.requests)
+
+
+@pytest.mark.parametrize("endpoint", ["novita/us-east-1", "alibaba", "alibaba/", "alibaba/us:fast", 123])
+def test_endpoint_pin_cannot_escape_the_vendor(endpoint: Any) -> None:
+    config = CONFIG.model_copy(update={"adapter_options": {**CONFIG.adapter_options,
+                                                          "provider_endpoint": endpoint}})
+    mock = MockOpenRouter()
+    check, _ = mock.adapter()._model_check(config, [])
+    assert check.passed is False and "provider_endpoint" in check.detail
+    assert not mock.requests
+    with pytest.raises(AdapterError, match="provider_endpoint"):
+        mock.adapter().prepare(config, MESSAGES, None, ctx())
+
+
 def edit_assistant(**fields: Any) -> Any:
     """An echo whose forwarded assistant message has `fields` replaced (None removes the field)."""
     def echo(body: dict[str, Any]) -> dict[str, Any]:
