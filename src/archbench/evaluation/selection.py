@@ -122,6 +122,29 @@ class SelectionAudit(SelectionExtraction):
     needs_fact_check: bool
 
 
+def _closed(properties: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+_RATING = _closed({"rating": {"type": "integer", "enum": [0, 1, 2, 3, 4]},
+                   "evidence": {"type": "array", "items": {"type": "string"}},
+                   "rationale": {"type": "string"}})
+# Provider-enforced JSON shape for SelectionAudit (Anthropic structured outputs). It uses only the schema
+# subset the API accepts (no length/range keywords); parse_selection still validates every output. Key
+# order puts needs_fact_check before quality, so the nested ratings close the object.
+SELECTION_AUDIT_OUTPUT_FORMAT: dict[str, Any] = {"type": "json_schema", "schema": _closed({
+    "selection_status": {"type": "string", "enum": ["selected", "declined", "ambiguous"]},
+    "items": {"type": "array", "items": _closed({
+        "name_as_written": {"type": "string"},
+        "role": {"type": "string", "enum": ["primary", "recommended", "conditional", "mentioned", "rejected"]},
+        "rank": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+        "evidence": {"type": "string"},
+    })},
+    "needs_fact_check": {"type": "boolean"},
+    "quality": _closed({k: _RATING for k in ("request_fit", "scenario_fit", "tradeoffs")}),
+})}
+
+
 def parse_selection(text: str, packet: dict[str, Any], catalog: SelectionCatalog,
                     target: Target, *, audit: bool = False) -> tuple[dict[str, Any] | None, list[str], dict[str, Any]]:
     try:

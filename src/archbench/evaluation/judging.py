@@ -74,12 +74,14 @@ def _errors(exc: ValidationError) -> list[str]:
 
 _MARKUP = re.compile(r"[*`]|\s*\|\s*")
 _QUOTES = "\"'“”‘’«»"
+_QUOTE_MARKS = re.compile(f"[{re.escape(_QUOTES)}]")
 
 
 def _evidence_text(text: str) -> str:
     """Normalise for quote matching: ignore case, whitespace, markdown emphasis/code/table markup, and
-    quotation marks the judge wrapped around the quote. Words and punctuation inside must still match."""
-    return normalise_text(_MARKUP.sub(" ", text)).strip(_QUOTES + " ")
+    quotation marks and apostrophes anywhere (a judge wrapping the quote, or dropping marks it would have to
+    escape inside JSON). Words and all other punctuation must still match."""
+    return normalise_text(_MARKUP.sub(" ", _QUOTE_MARKS.sub("", text)))
 
 
 def evidence_check(quotes: list[tuple[str, str]], answer: str) -> dict[str, Any]:

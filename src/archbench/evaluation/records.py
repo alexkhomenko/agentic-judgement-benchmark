@@ -10,7 +10,7 @@ from ..domain.records import Record, RecordKind
 from ..storage.artifacts import ArtifactStore
 from ..storage.database import Database
 
-EVALUATION_CODE_REVISION = "evaluation-v6"  # v6: every response is human-checked (v5: version digits may follow catalog names)
+EVALUATION_CODE_REVISION = "evaluation-v7"  # v7: evidence matching ignores quotation marks anywhere (v6: every response is human-checked; v5: version digits may follow catalog names)
 
 
 def run_records(db: Database, kind: RecordKind, experiment_id: str, run_id: str) -> list[Record]:

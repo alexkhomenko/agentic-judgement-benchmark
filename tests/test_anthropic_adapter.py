@@ -106,6 +106,17 @@ def test_request_is_native_explicit_and_captured_on_the_wire(tmp_path: Path) -> 
     assert outcome.cost_incurred is CostIncurred.YES
 
 
+def test_output_format_is_sent_as_structured_output_beside_effort(tmp_path: Path) -> None:
+    fmt = {"type": "json_schema", "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}},
+                                             "required": ["ok"], "additionalProperties": False}}
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["output_format"] = {"state": "explicit", "value": fmt}
+    rec = Recorder(ok(message('{"ok": true}')))
+    outcome, _ = call(tmp_path, rec, config=ModelConfiguration.model_validate(data))
+    assert outcome.succeeded
+    assert json.loads(rec.requests[0].content)["output_config"] == {"effort": "high", "format": fmt}
+
+
 def test_cost_is_computed_from_configured_pricing(tmp_path: Path) -> None:
     outcome, _ = call(tmp_path, Recorder(ok(message())))
     # 1000 input * $4/M + 500 output * $20/M

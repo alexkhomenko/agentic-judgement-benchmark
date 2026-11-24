@@ -12,6 +12,8 @@ Evidence and control:
 Configuration parameters (all others are rejected at qualification):
     max_output_tokens  explicit, required   -> max_tokens
     effort             explicit or omitted  -> output_config.effort
+    output_format      explicit or omitted  -> output_config.format (structured outputs; the value is sent
+                                               verbatim, e.g. {type: json_schema, schema: {...}})
     thinking           explicit or omitted  -> thinking
 adapter_options:
     timeout_s: <float>                       request timeout (default 600)
@@ -49,7 +51,7 @@ from .wire import CapturingTransport, wire_record
 
 STATE_FORMAT = "anthropic-messages-v1"
 PROBE_MAX_TOKENS = 2048
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "thinking"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "output_format", "thinking"})
 TransportFactory = Callable[[], httpx2.BaseTransport]
 
 
@@ -243,8 +245,13 @@ class AnthropicAdapter:
             params["system"] = parent.native_state["system"]
         elif system:
             params["system"] = "\n\n".join(system)
+        output_config: dict[str, Any] = {}
         if (effort := explicit(config, "effort")) is not None:
-            params["output_config"] = {"effort": effort}
+            output_config["effort"] = effort
+        if (output_format := explicit(config, "output_format")) is not None:
+            output_config["format"] = copy.deepcopy(output_format)
+        if output_config:
+            params["output_config"] = output_config
         if (thinking := explicit(config, "thinking")) is not None:
             params["thinking"] = thinking
         return PreparedInvocation(

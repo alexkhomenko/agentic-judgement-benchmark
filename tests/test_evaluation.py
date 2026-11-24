@@ -608,6 +608,17 @@ def test_evidence_check_tolerates_markdown_and_quotation_marks() -> None:
     assert result["verified"] == 3 and [u["where"] for u in result["unverified"]] == ["d"]
 
 
+def test_evidence_check_ignores_quotation_marks_inside_a_quote_but_not_words() -> None:
+    from archbench.evaluation.judging import evidence_check
+
+    answer = '### 1. The "Low-Code/BaaS" Stack (Most Suitable)\nThe coach\'s reminders run on «Upstash».'
+    quotes = [("name", "Low-Code/BaaS Stack"), ("exact", 'The "Low-Code/BaaS" Stack'),
+              ("apostrophe", "The coachs reminders run on Upstash"),
+              ("reworded", "Low-Code Stack"), ("punctuation", "Low-Code BaaS Stack")]
+    result = evidence_check(quotes, answer)
+    assert [u["where"] for u in result["unverified"]] == ["reworded", "punctuation"]
+
+
 def test_review_app_requires_token_and_records_checks(env: Env) -> None:
     import threading
     import urllib.error

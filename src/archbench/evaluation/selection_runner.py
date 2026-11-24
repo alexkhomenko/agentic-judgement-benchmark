@@ -30,6 +30,7 @@ from .judging import evaluation_messages
 from .records import selected_attempt
 from .runner import EvaluationPreflightError, FrozenModel, _freeze_model, _thaw_model
 from .selection import (
+    SELECTION_AUDIT_OUTPUT_FORMAT,
     SelectionCatalog, SelectionPolicy, Target, audit_flags, jev_questions,
     label_ranks, parse_labels, parse_selection, ranked_ids, sample_audits, scenario_selection,
 )
@@ -39,12 +40,13 @@ STAGES = {
     "classifier": (RecordKind.SELECTION_LABELS, "selection-labels", "classification"),
     "auditor": (RecordKind.SELECTION_AUDIT, "selection-audits", "judge"),
 }
-CODE_REVISION = "selection-evaluation-v2.1"
+CODE_REVISION = "selection-evaluation-v2.2"  # v2.2: schema-enforced audit, quote-mark-insensitive evidence
 
 
 def _code_hashes() -> dict[str, str]:
     return {p.name: sha256_bytes(p.read_bytes()) for p in
-            (Path(__file__), Path(__file__).with_name("selection.py"), Path(__file__).with_name("invocations.py"))}
+            (Path(__file__), Path(__file__).with_name("selection.py"), Path(__file__).with_name("invocations.py"),
+             Path(__file__).with_name("judging.py"))}
 
 
 def freeze_selection_inputs(policy_path: Path, base: Path) -> dict[str, Any]:
@@ -78,6 +80,9 @@ def start_selection_evaluation(db: Database, store: ArtifactStore, registry: Ada
         config = _thaw_model(entry).configuration
         if name == "classifier" and config.adapter != "typesafe":
             raise ValueError("v2 classification requires the native TypeSafe adapter")
+        output_format = config.parameters.get("output_format")
+        if name == "auditor" and output_format is not None and output_format.value != SELECTION_AUDIT_OUTPUT_FORMAT:
+            raise ValueError("auditor output_format must equal SELECTION_AUDIT_OUTPUT_FORMAT")
         adapter = registry.get(config.adapter)
         preflight = getattr(adapter, "preflight", None)
         if preflight and (problem := preflight(config)):

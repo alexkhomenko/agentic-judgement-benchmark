@@ -15,6 +15,7 @@ from archbench.adapters.registry import AdapterRegistry
 from archbench.domain.execution import CostIncurred, Observation
 from archbench.domain.records import RecordKind
 from archbench.evaluation.selection import (
+    SELECTION_AUDIT_OUTPUT_FORMAT, AuditRating, NamedRecommendation, SelectionAudit,
     SelectionCatalog, SelectionPolicy, audit_flags, jev_questions, parse_labels,
     parse_selection, sample_audits, scenario_selection,
 )
@@ -256,3 +257,29 @@ def test_sampling_is_deterministic_and_covers_cloud_and_local_without_using_conf
 def test_scenario_targets_and_formats(target: str,suffix: str,count: int) -> None:
     assert scenario_selection(f"agentic-design-bias-v2-s3-legacy-java-appointments-{target}-{suffix}")== (target,count)
     with pytest.raises(ValueError):scenario_selection("agentic-design-bias-p6-pick-model")
+
+
+def test_audit_output_schema_matches_the_parsed_model() -> None:
+    schema = SELECTION_AUDIT_OUTPUT_FORMAT["schema"]
+    props = schema["properties"]
+    assert set(schema["required"]) == set(props) == set(SelectionAudit.model_fields)
+    item = props["items"]["items"]
+    assert set(item["required"]) == set(NamedRecommendation.model_fields)
+    quality = props["quality"]
+    assert set(quality["required"]) == {"request_fit", "scenario_fit", "tradeoffs"}
+    for rating in quality["properties"].values():
+        assert set(rating["required"]) == set(AuditRating.model_fields)
+    # needs_fact_check precedes quality so the model never resumes the root after closing nested ratings.
+    assert list(props).index("needs_fact_check") < list(props).index("quality")
+    forbidden = {"minimum", "maximum", "minLength", "maxLength", "multipleOf"}
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            assert not forbidden & node.keys()
+            if node.get("type") == "object":
+                assert node["additionalProperties"] is False
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(schema)
