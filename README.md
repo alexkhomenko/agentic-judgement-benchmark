@@ -337,17 +337,18 @@ requires a note. The audit failures remain recorded and its quality scores remai
 can count as reviewed and its run can complete once coverage is balanced and all other work is resolved;
 the reports still state that automatic outputs were not all valid.
 
-The pilot configuration `configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml` runs one
-independent personal-agent provider question on the pinned local MLX Qwen 3.5 9B checkpoint.
+V2 compares cloud models only; local models are excluded because their older training cutoffs make
+their answers incomparable. A v2 slice is an experiment config with one question and one or more cloud
+configurations from the [roster lock](configs/experiments/agentic-design-bias-v2/roster.lock.yaml):
 
 ```sh
-bench qualify configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml
-bench plan configs/experiments/agentic-design-bias-v2/slice-mlx-qwen.yaml
-bench run agentic-design-bias-v2-slice-mlx-qwen-001
-bench evaluate-v2 agentic-design-bias-v2-slice-mlx-qwen-001
+bench qualify <slice-config.yaml>
+bench plan <slice-config.yaml>
+bench run <experiment-id>
+bench evaluate-v2 <experiment-id>
 bench review <selection-evaluation-run> --reviewer alexander
 bench selection-status <selection-evaluation-run>
-bench report agentic-design-bias-v2-slice-mlx-qwen-001 --evaluation <selection-evaluation-run>
+bench report <experiment-id> --evaluation <selection-evaluation-run>
 ```
 
 V2 review shows the answer, Luna's extracted recommendations, Jev's preference and compliance labels,
@@ -357,7 +358,7 @@ until resolved. Opening the page never approves an answer. Each decision is appe
 exact evidence seen; changed evaluation evidence makes the decision stale. Reports and `selection-status`
 require balanced candidate coverage, valid preference/compliance outputs, a valid or explicitly human-resolved
 quality audit where required, and human approval of every answer
-before reporting completion. This pilot covers only its one-model, one-question plan, not the full v2 roster.
+before reporting completion. A slice covers only its own models and question, not the full v2 roster.
 
 For v2, `bench report` writes a self-contained `report.html`, a Markdown version, `report.json`, and an
 input manifest under `results/<experiment>/reports/<revision>/`. The report includes full answers, every

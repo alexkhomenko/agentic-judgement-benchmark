@@ -283,3 +283,21 @@ def test_audit_output_schema_matches_the_parsed_model() -> None:
             for v in node:
                 walk(v)
     walk(schema)
+
+
+def test_v2_refuses_to_plan_local_models(env: Env) -> None:
+    from archbench.planning.compiler import PlanError, compile_plan
+
+    scenario = env.tmp/"scenario"
+    scenario.mkdir()
+    (scenario/"system.md").write_text("Answer directly.")
+    (scenario/"prompt.md").write_text("Select one model provider.")
+    (scenario/"metadata.yaml").write_text(yaml.safe_dump({
+        "scenario_id": "agentic-design-bias-v2-s1-personal-family-provider-pick-one", "revision": "1",
+        "system_prompt": "system.md", "rounds": [{"round": 1, "name": "pick", "prompt": "prompt.md"}]}))
+    cloud = env.config("cloud-candidate")
+    local = env.config("local-candidate", track="local")
+    experiment = env.experiment("v2-local", [cloud, local], scenario=str(scenario))
+    env.force_qualify(experiment)
+    with pytest.raises(PlanError, match="excludes local models.*local-candidate"):
+        compile_plan(experiment, base=env.base, db=env.db)

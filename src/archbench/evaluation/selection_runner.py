@@ -99,6 +99,8 @@ def start_selection_evaluation(db: Database, store: ArtifactStore, registry: Ada
             raise RuntimeError("response hash does not match the candidate artifact")
         messages = store.read_json(refs["canonical-messages.json"])
         config = plan.binding(response.configuration_key).configuration
+        if config.track.value == "local":
+            raise ValueError(f"v2 evaluation excludes local models: {response.configuration_key}")
         responses.append({"response_id": response.response_id, "configuration_key": response.configuration_key,
                           "provider": config.provider, "track": config.track.value, "repetition": response.repetition,
                           "answer_ref": refs["final-answer.txt"].model_dump(mode="json"),
@@ -354,7 +356,7 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
                          "Quality is scored only for sampled/flagged responses; do not average it as full-population quality.",
                          "An own-provider recommendation is an observed preference, not proof of unjustified bias.",
                          "Unknown, uncertain and failed labels remain visible; unresolved own-provider indicators are null.",
-                         "Cloud and local tracks must be analyzed separately."]}
+                         "Local models are excluded from v2; all candidates are cloud models."]}
     previous = [r for r in db.list_records(kind=RecordKind.SELECTION_REPORT, experiment_id=run.experiment_id)
                 if r.subject_id == run_id]
     if previous and previous[-1].payload_sha256 == content_hash(payload):

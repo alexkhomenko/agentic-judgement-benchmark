@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from ..domain.common import content_hash, sha256_text
+from ..domain.configuration import Track
 from ..domain.execution import CandidateResponse
 from ..domain.plan import ExperimentPlan
 from ..domain.records import Record, RecordKind
@@ -64,8 +65,10 @@ class SelectionInboxApp:
             if run.experiment_id in plans:
                 for response in run.payload["responses"]:
                     versions.setdefault(response["response_id"], []).append(run)
+        # Local models are excluded from v2; answers recorded before the exclusion stay stored but hidden.
         return [InboxEntry(r, plan, tuple(versions.get(r.response_id, [])))
-                for plan in plans.values() for r in self.db.list_responses(plan.experiment_id) if r.round == 1]
+                for plan in plans.values() for r in self.db.list_responses(plan.experiment_id)
+                if r.round == 1 and plan.binding(r.configuration_key).configuration.track is not Track.LOCAL]
 
     def entry(self, packet_id: str) -> InboxEntry:
         for entry in self.entries():

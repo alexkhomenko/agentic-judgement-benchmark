@@ -71,6 +71,22 @@ def test_newest_pending_answer_first_and_non_v2_answers_excluded(env: Env) -> No
     assert all(i["state"] == "unchecked" for i in q["items"])
 
 
+def test_local_answers_recorded_before_the_v2_exclusion_are_hidden(env: Env, monkeypatch: Any) -> None:
+    from archbench.planning import compiler
+
+    setup(env, repetitions=1)
+    with monkeypatch.context() as m:
+        m.setattr(compiler, "V2_SCENARIO_PREFIX", "planned-before-the-exclusion")
+        config = env.config("old-local-model", provider="hidden-author-identity", track="local",
+            adapter_options={"style": "recommendations", "recommendation_pool": ["Acme"], "recommendation_count": 1})
+        local = env.plan(env.experiment("old-local", [config], scenario=str(env.tmp/"scenario"), repetitions=1),
+                         force=True)
+    Controller(env.db, env.store, env.registry).run(local)
+    assert env.db.list_responses(local.experiment_id)
+    entries = SelectionInboxApp(env.db, env.store, "alexander").entries()
+    assert len(entries) == 1 and all(e.plan.experiment_id != local.experiment_id for e in entries)
+
+
 def test_new_evaluation_is_one_versioned_item_and_old_approval_does_not_transfer(env: Env) -> None:
     plan, path, registry, _, _ = setup(env, repetitions=1)
     run = start_selection_evaluation(env.db, env.store, registry, plan.experiment_id, path, base=env.base)
