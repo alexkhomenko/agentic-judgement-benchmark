@@ -19,7 +19,7 @@ from archbench.adapters.cloud.typesafe_jev import TypeSafeAdapter
 from archbench.adapters.fake import FakeAdapter
 from archbench.adapters.registry import AdapterRegistry
 from archbench.domain.configuration import ModelConfiguration
-from archbench.domain.execution import CostIncurred, FailureKind
+from archbench.domain.execution import CostIncurred, FailureKind, observed_spend
 from archbench.domain.records import RecordKind
 from archbench.domain.scenario import Message, Role
 from archbench.evaluation.runner import resume_evaluation, start_evaluation
@@ -202,10 +202,27 @@ def test_paused_turn_is_resumed_with_its_content_and_usage_is_summed(tmp_path: P
 
 def test_a_failed_resume_keeps_the_billed_paused_call(tmp_path: Path) -> None:
     error = ok({"type": "error", "error": {"type": "overloaded_error", "message": "x"}}, 529)
-    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=2, stop="pause_turn")), error), config=searching_config())
+    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=2, stop="pause_turn")), error),
+                      config=searching_config(web_search_usd_per_request=0.01))
     assert not outcome.succeeded and outcome.failure_kind is FailureKind.TRANSIENT_TRANSPORT
     assert outcome.cost_incurred is CostIncurred.YES
     assert outcome.observations["web_search_requests"].value == 2
+    # The overloaded resume was not billed: the paused call's cost is the whole cost.
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(0.034)
+    assert "api_cost_usd_lower_bound" not in outcome.observations
+
+
+def test_a_timed_out_resume_marks_the_total_cost_unknown_and_keeps_the_billed_subtotal(tmp_path: Path) -> None:
+    paused = ok(searched(searches=2, stop="pause_turn"))
+    outcome, _ = call(tmp_path, Recorder(paused, httpx2.ReadTimeout("read timed out")),
+                      config=searching_config(web_search_usd_per_request=0.01))
+    assert outcome.failure_kind is FailureKind.AMBIGUOUS_TIMEOUT and outcome.cost_incurred is CostIncurred.YES
+    total, bound = outcome.observations["api_cost_usd"], outcome.observations["api_cost_usd_lower_bound"]
+    assert total.value is None and "may have been billed" in str(total.missing_reason)
+    assert bound.value == pytest.approx(0.034)  # the subtotal the review saw reported as a complete total
+    # Readers of metrics.json count the subtotal as known spend and the call as having unknown cost.
+    known, complete = observed_spend({k: v.model_dump() for k, v in outcome.observations.items()})
+    assert known == pytest.approx(0.034) and complete is False
 
 
 def test_resumes_can_be_turned_off(tmp_path: Path) -> None:

@@ -28,6 +28,16 @@ def effective(records: Iterable[Record]) -> list[Record]:
     return [r for r in items if r.record_id not in superseded]
 
 
+WITHDRAWN = "withdrawn"
+
+
+def current_adjudications(db: Database, experiment_id: str, run_id: str) -> list[Record]:
+    """Effective adjudications that carry a score. A withdrawal supersedes an adjudication whose response
+    went back to pending (a new blocking check, or its check went stale) and stands for "no score"."""
+    return [r for r in effective(run_records(db, RecordKind.ADJUDICATION, experiment_id, run_id))
+            if r.payload["basis"] != WITHDRAWN]
+
+
 def packet_ref(db: Database, packet_id: str) -> ArtifactRef:
     return db.artifacts_for(packet_id)["packet.json"]
 

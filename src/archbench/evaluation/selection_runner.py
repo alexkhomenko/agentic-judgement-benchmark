@@ -16,7 +16,7 @@ import yaml
 
 from ..adapters.registry import AdapterRegistry
 from ..domain.common import content_hash, new_id, sha256_bytes, sha256_text
-from ..domain.execution import AttemptStatus
+from ..domain.execution import AttemptStatus, observed_spend
 from ..domain.records import Record, RecordKind
 from ..domain.scenario import Message, Role
 from ..execution.limits import CheckpointStop, resource_exhausted
@@ -340,10 +340,9 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
                 inputs[record.record_id] = record.payload_sha256
                 calls += 1
                 ref = db.artifacts_for(record.record_id).get("metrics.json")
-                metric = store.read_json(ref).get("api_cost_usd", {}).get("value") if ref else None
-                if metric is not None:
-                    known_cost += float(metric)
-                elif record.payload.get("cost_incurred") != "no":
+                usd, complete = observed_spend(store.read_json(ref) if ref else None)
+                known_cost += usd
+                if not complete and record.payload.get("cost_incurred") != "no":
                     unknown_cost += 1
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:

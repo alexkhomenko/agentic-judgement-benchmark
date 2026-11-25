@@ -15,9 +15,10 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from ..domain.common import content_hash
+from ..domain.execution import observed_spend
 from ..domain.records import Record, RecordKind
 from ..evaluation.checks import RunIndex
-from ..evaluation.records import effective, run_records, selected_attempt
+from ..evaluation.records import current_adjudications, effective, run_records, selected_attempt
 from ..evaluation.review import selection_record_id
 from .bias import bias_tables
 from ..evaluation.runner import EvaluationStatus, RunContext, evaluation_status, load_run
@@ -107,7 +108,7 @@ def _inputs(db: Database, ctx: RunContext) -> dict[str, list[Record]]:
         "recommendation_extraction": run_records(db, RecordKind.RECOMMENDATION_EXTRACTION, exp, run_id),
         "human_check": effective(run_records(db, RecordKind.HUMAN_CHECK, exp, run_id)),
         "human_review": effective(run_records(db, RecordKind.HUMAN_REVIEW, exp, run_id)),
-        "adjudication": effective(run_records(db, RecordKind.ADJUDICATION, exp, run_id)),
+        "adjudication": current_adjudications(db, exp, run_id),
     }
     selection = db.get_record(selection_record_id(run_id))
     inputs["review_selection"] = [selection] if selection else []
@@ -120,6 +121,11 @@ def _inputs(db: Database, ctx: RunContext) -> dict[str, list[Record]]:
 
 
 # ----- tables ----------------------------------------------------------------------------------------
+
+
+def _spend(db: Database, store: ArtifactStore, owner_id: str) -> tuple[float, bool]:
+    ref = db.artifacts_for(owner_id).get("metrics.json")
+    return observed_spend(store.read_json(ref) if ref is not None else None)
 
 
 def _metric(db: Database, store: ArtifactStore, owner_id: str, name: str) -> float | None:
@@ -138,11 +144,12 @@ class CostTally:
         self.unknown = 0
         self.calls = 0
 
-    def add(self, cost_incurred: str, observed_usd: float | None) -> None:
+    def add(self, cost_incurred: str, observed_usd: float | None, complete: bool = True) -> None:
+        """`complete=False`: `observed_usd` is only a billed subtotal, so the call still counts as unknown."""
         self.calls += 1
         if observed_usd is not None:
             self.known += observed_usd
-        elif cost_incurred != "no":
+        if (observed_usd is None or not complete) and cost_incurred != "no":
             self.unknown += 1
 
     def row(self, stage: str) -> dict[str, Any]:
@@ -216,9 +223,9 @@ def build_tables(
         selected_attempts = {e["attempt_id"] for e in got}
         cfg_cost = CostTally()
         for a in attempts:
-            usd = _metric(db, store, a["attempt_id"], "api_cost_usd")
-            (candidate_cost if a["attempt_id"] in selected_attempts else retry_cost).add(a["cost_incurred"], usd)
-            cfg_cost.add(a["cost_incurred"], usd)
+            usd, complete = _spend(db, store, a["attempt_id"])
+            (candidate_cost if a["attempt_id"] in selected_attempts else retry_cost).add(a["cost_incurred"], usd, complete)
+            cfg_cost.add(a["cost_incurred"], usd, complete)
         latencies = [v for e in got if (v := _metric(db, store, e["attempt_id"], "client_wall_ms")) is not None]
 
         failed = blocked = 0
@@ -290,7 +297,7 @@ def build_tables(
     for tally, recs in ((judge_cost, inputs["judge_evaluation"]), (classifier_cost, inputs["architecture_classification"]),
                         (extraction_cost, inputs["recommendation_extraction"])):
         for r in recs:
-            tally.add(r.payload["cost_incurred"], _metric(db, store, r.record_id, "api_cost_usd"))
+            tally.add(r.payload["cost_incurred"], *_spend(db, store, r.record_id))
     for r in inputs["judge_evaluation"]:
         if r.payload.get("status") == "completed" and r.payload.get("provider") == providers.get(str(r.subject_id)):
             self_family += 1

@@ -440,6 +440,19 @@ def test_a_failed_resume_keeps_the_billed_paused_call(tmp_path: Path) -> None:
     outcome, _ = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
     assert not outcome.succeeded and outcome.cost_incurred is CostIncurred.YES
     assert outcome.observations["web_search_requests"].value == 2
+    # The overloaded resume was not billed: the paused call's cost is the whole cost.
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST + 0.02)
+    assert "api_cost_usd_lower_bound" not in outcome.observations
+
+
+def test_a_timed_out_resume_marks_the_total_cost_unknown_and_keeps_the_billed_subtotal(tmp_path: Path) -> None:
+    mock = MockMiniMax(replies=[httpx2.Response(200, json=searched(stop="pause_turn")),
+                                httpx2.ReadTimeout("read timed out")])
+    outcome, _ = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert outcome.failure_kind is FailureKind.AMBIGUOUS_TIMEOUT and outcome.cost_incurred is CostIncurred.YES
+    total, bound = outcome.observations["api_cost_usd"], outcome.observations["api_cost_usd_lower_bound"]
+    assert total.value is None and "may have been billed" in str(total.missing_reason)
+    assert bound.value == pytest.approx(EXPECTED_COST + 0.02)
 
 
 @pytest.mark.parametrize("value", [

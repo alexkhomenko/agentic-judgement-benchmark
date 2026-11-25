@@ -58,7 +58,7 @@ from ..base import (
     QualificationReport,
     QualificationRequirements,
 )
-from .common import CollectingSink, context_check, explicit, failed, merge_pause_turns
+from .common import CollectingSink, after_failed_resume, context_check, explicit, failed, merge_pause_turns
 from .wire import CapturingTransport, wire_record
 
 STATE_FORMAT = "anthropic-messages-v1"
@@ -311,7 +311,8 @@ class AnthropicAdapter:
                 merged = merge_pause_turns(bodies)
                 return outcome.model_copy(update={
                     "cost_incurred": CostIncurred.YES, "native_response": merged,
-                    "observations": _observations(config, merged["usage"], searching="tools" in params),
+                    "observations": after_failed_resume(
+                        _observations(config, merged["usage"], searching="tools" in params), outcome.cost_incurred),
                     "error": {**(outcome.error or {}), "after_pause_turns": len(bodies)}})
             body, request_id = outcome
             bodies.append(body)

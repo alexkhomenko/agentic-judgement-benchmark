@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
 from pydantic import model_validator
 
@@ -59,6 +61,21 @@ class Observation(Frozen):
     @classmethod
     def missing(cls, unit: str, source: str, reason: str) -> Observation:
         return cls(value=None, unit=unit, source=source, missing_reason=reason)
+
+
+API_COST = "api_cost_usd"  # the call's whole cost; missing when any part of it is unknown
+API_COST_LOWER_BOUND = "api_cost_usd_lower_bound"  # billed subtotal kept beside a missing total
+
+
+def observed_spend(metrics: Mapping[str, Any] | None) -> tuple[float, bool]:
+    """Known USD in a metrics.json mapping, and whether it is the call's whole cost. When the total is unknown,
+    the known part is the recorded lower bound (for example, paused calls billed before a failed resume)."""
+    metrics = metrics or {}
+    total = (metrics.get(API_COST) or {}).get("value")
+    if isinstance(total, int | float):
+        return float(total), True
+    bound = (metrics.get(API_COST_LOWER_BOUND) or {}).get("value")
+    return (float(bound) if isinstance(bound, int | float) else 0.0), False
 
 
 class ArtifactRef(Frozen):

@@ -206,6 +206,18 @@ def test_used_up_rate_limit_waits_fail_the_run_but_a_later_run_resumes(env: Env)
     assert second.task_status == {"succeeded": 4} and waits == [5, 5]
 
 
+def test_backoff_does_not_retry_a_rate_limit_that_retry_on_excludes(env: Env) -> None:
+    cfg = env.config("noretry", adapter_options={"rate_limited_failures": {"1": 3}})
+    plan = env.plan(env.experiment("exp-noretry", [cfg], repetitions=1,
+                                   retry={"retry_on": [], "max_attempts": 1, "rate_limit_backoff_s": [5, 5]}))
+    waits: list[float] = []
+    summary = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert summary.attempts == 1 and waits == [] and summary.task_status == {"blocked": 3, "failed": 1}
+    # A later run does not retry it either.
+    again = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert again.attempts == 1 and waits == []
+
+
 def test_plans_frozen_before_backoff_existed_keep_their_hash(env: Env) -> None:
     from archbench.domain.plan import ExperimentPlan
     plan = env.plan(env.experiment("exp-hash", [env.config("hashed")], repetitions=1))

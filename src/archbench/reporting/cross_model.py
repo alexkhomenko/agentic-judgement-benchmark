@@ -29,7 +29,7 @@ from ..domain.common import content_hash, utc_now
 from ..domain.recommendations import UNKNOWN_VENDOR, UNLISTED, FrameworkCatalog
 from ..domain.records import RecordKind
 from ..evaluation.checks import RunIndex
-from ..evaluation.records import effective, run_records
+from ..evaluation.records import current_adjudications, run_records
 from ..evaluation.review import judge_raw_scores
 from ..evaluation.runner import RunContext, evaluation_status, load_run
 from ..planning.compiler import load_plan
@@ -88,7 +88,7 @@ def _run_cells(db: Database, store: ArtifactStore, ctx: RunContext) -> tuple[dic
     status = evaluation_status(db, run_id)
     index = RunIndex.build(db, ctx)
     adjudications = {str(r.subject_id): r.payload
-                     for r in effective(run_records(db, RecordKind.ADJUDICATION, exp, run_id))}
+                     for r in current_adjudications(db, exp, run_id)}
     by_response = {str(p.subject_id): p for p in index.packets}
     probe, number = _probe(ctx.plan.scenario.scenario_id)
     catalog = ctx.catalog

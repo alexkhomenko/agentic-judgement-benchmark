@@ -3,6 +3,8 @@ response, full review of flagged responses, adjudication, append-only lineage, a
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -422,6 +424,48 @@ def test_adjudication_waits_for_a_check_of_every_response(env: Env) -> None:
     basis = {a.subject_id: a.payload["basis"] for a in records(env, run, RecordKind.ADJUDICATION)}
     assert basis[judge_flag.subject_id] == basis[answer_flag.subject_id] == "human_review"
     assert basis[later.subject_id] == "judge_mean_checked"
+
+
+def test_flag_after_approval_withdraws_the_adjudicated_score(env: Env) -> None:
+    plan = executed(env, "exp-withdraw", repetitions=1)
+    run, _ = evaluate(env, plan, policy(env))
+    ctx = load_run(env.db, run.record_id)
+    check_all(env, run)
+    adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    packets = records(env, run, RecordKind.BLINDED_PACKET)
+    target = packets[0]
+    rid = str(target.subject_id)
+    original = next(a for a in records(env, run, RecordKind.ADJUDICATION) if a.subject_id == rid)
+    before = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
+    assert before.payload["leaderboard"][0]["scored"] == len(packets)
+
+    # The reviewer changes their mind: the answer is flagged, so the response needs a full review.
+    check(env, run, target.record_id, flags=("answer",), note="answer is cut off mid-table")
+    progress = adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    assert progress.withdrawn == 1 and progress.pending_human_review == [rid]
+    assert progress.adjudicated == len(packets) - 1
+    current = [a for a in effective(records(env, run, RecordKind.ADJUDICATION)) if a.subject_id == rid]
+    assert len(current) == 1 and current[0].supersedes == original.record_id
+    assert current[0].payload["basis"] == "withdrawn" and "score" not in current[0].payload
+    assert env.db.get_record(original.record_id) == original  # retained unchanged
+    assert adjudicate(env.db, run, ctx.policy, ctx.rubric).withdrawn == 0  # not re-withdrawn
+
+    status = evaluation_status(env.db, run.record_id)
+    assert not status.complete and status.adjudications.done == len(packets) - 1
+    after = publish_report(env.db, env.store, plan.experiment_id, run.record_id)
+    assert after.record_id != before.record_id and after.payload["evaluation_complete"] is False
+    assert after.payload["leaderboard"][0]["scored"] == len(packets) - 1
+    rows = env.store.read_verified(env.db.artifacts_for(after.record_id)["responses.csv"]).decode()
+    row = next(r for r in csv.DictReader(io.StringIO(rows)) if r["response_id"] == rid)
+    assert row["basis"] == row["adjusted_score"] == row["acceptable"] == ""
+
+    # A full review restores a score for the response.
+    submit(env, run, target.record_id, rating=2)
+    progress = adjudicate(env.db, run, ctx.policy, ctx.rubric)
+    assert progress.added == 1 and progress.adjudicated == len(packets)
+    restored = next(a for a in effective(records(env, run, RecordKind.ADJUDICATION)) if a.subject_id == rid)
+    assert restored.supersedes == current[0].record_id and restored.payload["basis"] == "human_review"
+    assert evaluation_status(env.db, run.record_id).complete
 
 
 def test_check_validation_supersession_and_staleness(env: Env) -> None:

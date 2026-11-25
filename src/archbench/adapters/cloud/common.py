@@ -10,7 +10,7 @@ from typing import Any
 
 from ...domain.common import ARTIFACT_SCHEMA_VERSION, sha256_text
 from ...domain.configuration import ModelConfiguration, ParameterState
-from ...domain.execution import ArtifactRef, CostIncurred, FailureKind
+from ...domain.execution import API_COST, API_COST_LOWER_BOUND, ArtifactRef, CostIncurred, FailureKind, Observation
 from ..base import NativeExecution, QualificationCheck, QualificationRequirements
 
 CHARS_PER_TOKEN_ESTIMATE = 3  # conservative; real tokenizers usually yield fewer tokens
@@ -69,6 +69,21 @@ def merge_pause_turns(bodies: list[dict[str, Any]]) -> dict[str, Any]:
     merged["usage"] = sum_usage([body.get("usage") or {} for body in bodies])
     merged["harness_pause_turns"] = copy.deepcopy(bodies[:-1])
     return merged
+
+
+def after_failed_resume(observations: dict[str, Observation], resume_cost: CostIncurred) -> dict[str, Observation]:
+    """Observations of the calls billed before a resume after pause_turn failed. Unless the failed resume was
+    certainly not billed, their cost is only a lower bound: the total is marked unknown and the subtotal kept."""
+    cost = observations.get(API_COST)
+    if resume_cost is CostIncurred.NO or cost is None or cost.value is None:
+        return observations
+    return {
+        **observations,
+        API_COST: Observation.missing(
+            "usd", cost.source, f"a resumed call failed and may have been billed (cost {resume_cost.value}); "
+                                f"the calls before it cost {cost.value} USD"),
+        API_COST_LOWER_BOUND: cost.model_copy(update={"source": f"{cost.source}: calls before the failed resume"}),
+    }
 
 
 def sum_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:

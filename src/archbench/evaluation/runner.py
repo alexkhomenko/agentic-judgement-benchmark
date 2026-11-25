@@ -48,7 +48,7 @@ from .judging import (
     structured_messages,
 )
 from .packets import build_packet
-from .records import EVALUATION_CODE_REVISION, effective, read_packet, run_records, selected_attempt
+from .records import EVALUATION_CODE_REVISION, current_adjudications, effective, read_packet, run_records, selected_attempt
 from .review import build_selection, publish_selection, selection_record_id
 from .validation import validate_response
 
@@ -522,7 +522,7 @@ def evaluation_status(db: Database, evaluation_run_id: str) -> EvaluationStatus:
     checked = sum(1 for s in states.values() if s in ("approved", "flagged"))
     needs_review = {p.record_id for p in packets if index.blocking(p.record_id)}
     reviewed = {r.payload["packet_id"] for r in effective(run_records(db, RecordKind.HUMAN_REVIEW, exp, run_id))}
-    adjudications = effective(run_records(db, RecordKind.ADJUDICATION, exp, run_id))
+    adjudications = current_adjudications(db, exp, run_id)
 
     pending = []
     if len(validations) < total or len(packets) < answered:

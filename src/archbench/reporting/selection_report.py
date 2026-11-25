@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.common import content_hash, sha256_bytes
+from ..domain.execution import observed_spend
 from ..domain.records import Record, RecordKind
 from ..evaluation.selection_review import current_reviews
 from ..evaluation.selection_runner import STAGES, _load, _records
@@ -82,10 +83,9 @@ def collect(db: Database, store: ArtifactStore, experiment_id: str, run_id: str)
     artifact_hashes = {r["relpath"]: r["sha256"] for c in calls for r in c["artifacts"].values()}
     known_cost, unknown_cost = 0.0, 0
     for call in calls:
-        cost = call.get("metrics", {}).get("api_cost_usd", {}).get("value")
-        if cost is not None:
-            known_cost += float(cost)
-        elif call.get("cost_incurred") != "no":
+        usd, complete = observed_spend(call.get("metrics"))
+        known_cost += usd
+        if not complete and call.get("cost_incurred") != "no":
             unknown_cost += 1
     return {"reporting_policy": REVISION, "experiment_id": experiment_id, "evaluation_run_id": run_id,
             "selection_report_id": selection.record_id, "automatic_report_id": selection.payload["automatic_report_id"],

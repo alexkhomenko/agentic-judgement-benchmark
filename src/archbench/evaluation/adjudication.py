@@ -10,6 +10,8 @@ Original judge evaluations, human checks, and human reviews are never modified. 
   - approved (or flagged only on the extraction): the per-dimension mean of the judge evaluations the check
     approved, with the critical failures the reviewer confirmed.
 When the inputs change (for example a corrected check or review), a new adjudication supersedes the old.
+When a response with an adjudication goes back to pending, a withdrawal (basis "withdrawn", no score)
+supersedes it, so the old score stops counting until the response can be adjudicated again.
 """
 
 from __future__ import annotations
@@ -25,7 +27,14 @@ from ..domain.evaluation import EvaluationPolicy, Rubric
 from ..domain.records import Record, RecordKind
 from ..storage.database import Database
 from .checks import RunIndex
-from .records import EVALUATION_CODE_REVISION, effective, run_records, selected_attempt
+from .records import (
+    EVALUATION_CODE_REVISION,
+    WITHDRAWN,
+    current_adjudications,
+    effective,
+    run_records,
+    selected_attempt,
+)
 from .review import selection_record_id
 from .runner import load_run
 from .scoring import compute_score
@@ -38,6 +47,7 @@ class AdjudicationProgress(Frozen):
     pending_human_check: list[str] = Field(default_factory=list)
     pending_human_review: list[str] = Field(default_factory=list)  # flagged by a check; needs a full review
     adjudicated: int = 0
+    withdrawn: int = 0  # earlier adjudications withdrawn because their response went back to pending
 
 
 def _mean_ratings(ratings: list[dict[str, int]]) -> dict[str, float]:
@@ -63,9 +73,32 @@ def adjudicate(db: Database, run: Record, policy: EvaluationPolicy, rubric: Rubr
         for r in effective(run_records(db, RecordKind.ADJUDICATION, experiment_id, run.record_id))
     }
 
-    added = superseded = 0
+    added = superseded = withdrawn = 0
     pending: list[str] = []
     unchecked: list[str] = []
+
+    def withdraw(rid: str, packet: Record, reason: str, checks: list[Record]) -> None:
+        nonlocal withdrawn
+        prior = existing.get(rid)
+        if prior is None or prior.payload["basis"] == WITHDRAWN:
+            return
+        db.insert_record(Record.create(
+            kind=RecordKind.ADJUDICATION, record_id=new_id("adj"), experiment_id=experiment_id, subject_id=rid,
+            inputs={c.record_id: c.payload_sha256 for c in checks},
+            policy_revision=f"{policy.key}/adjudication:{policy.adjudication.rule}",
+            code_revision=EVALUATION_CODE_REVISION, supersedes=prior.record_id,
+            payload={
+                "evaluation_run_id": run.record_id,
+                "packet_id": packet.record_id,
+                "round": int(packet.payload["round"]),
+                "rule": policy.adjudication.rule,
+                "basis": WITHDRAWN,
+                "reason": reason,
+                "human_check_ids": [c.record_id for c in checks],
+            },
+        ))
+        withdrawn += 1
+
     for response_id, packet in sorted(packets.items(), key=lambda kv: str(kv[0])):
         rid = str(response_id)
         round_number = int(packet.payload["round"])
@@ -84,9 +117,11 @@ def adjudicate(db: Database, run: Record, policy: EvaluationPolicy, rubric: Rubr
             confirmed = sorted({f for h in human for f in h.payload["confirmed_critical_failures"]})
         elif not checks:
             unchecked.append(rid)
+            withdraw(rid, packet, "pending_human_check", checks)
             continue
         elif any(c.payload["blocking"] for c in checks) or not chosen:
             pending.append(rid)
+            withdraw(rid, packet, "pending_human_review", checks)
             continue
         else:
             basis = "judge_mean_checked"
@@ -138,8 +173,8 @@ def adjudicate(db: Database, run: Record, policy: EvaluationPolicy, rubric: Rubr
         ))
         added += 1
         superseded += prior is not None
-    total = len(effective(run_records(db, RecordKind.ADJUDICATION, experiment_id, run.record_id)))
+    total = len(current_adjudications(db, experiment_id, run.record_id))
     return AdjudicationProgress(
         evaluation_run_id=run.record_id, added=added, superseded=superseded, pending_human_check=unchecked,
-        pending_human_review=pending, adjudicated=total,
+        pending_human_review=pending, adjudicated=total, withdrawn=withdrawn,
     )

@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from ..domain.common import content_hash, utc_now
-from ..domain.execution import CostIncurred, TaskStatus
+from ..domain.execution import CostIncurred, TaskStatus, observed_spend
 from ..domain.plan import ExperimentPlan
 from ..domain.records import RecordKind
 from ..evaluation.selection import scenario_selection
@@ -93,8 +93,8 @@ def _attempt_cost(db: Database, store: ArtifactStore, attempt_id: str, incurred:
     if incurred is CostIncurred.NO:
         return Spend()
     ref = db.artifacts_for(attempt_id).get("metrics.json")
-    value = (store.read_json(ref).get("api_cost_usd") or {}).get("value") if ref else None
-    return Spend(usd=float(value)) if isinstance(value, int | float) else Spend(unknown=1)
+    usd, complete = observed_spend(store.read_json(ref) if ref else None)
+    return Spend(usd=usd, unknown=0 if complete else 1)
 
 
 def _evaluation_spend(db: Database, store: ArtifactStore, experiment_id: str) -> Spend:
@@ -102,8 +102,8 @@ def _evaluation_spend(db: Database, store: ArtifactStore, experiment_id: str) ->
     for ref in db.artifacts_under(f"{experiment_id}/evaluations/"):
         if ref.name != "metrics.json":
             continue
-        value = (store.read_json(ref).get("api_cost_usd") or {}).get("value")
-        spend.add(Spend(usd=float(value)) if isinstance(value, int | float) else Spend(unknown=1))
+        usd, complete = observed_spend(store.read_json(ref))
+        spend.add(Spend(usd=usd, unknown=0 if complete else 1))
     return spend
 
 

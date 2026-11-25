@@ -83,7 +83,7 @@ from ..base import (
     QualificationReport,
     QualificationRequirements,
 )
-from .common import CollectingSink, context_check, explicit, failed, merge_pause_turns
+from .common import CollectingSink, after_failed_resume, context_check, explicit, failed, merge_pause_turns
 from .wire import CapturingTransport, wire_record
 
 STATE_FORMAT = "minimax-messages-v1"
@@ -321,8 +321,9 @@ class MiniMaxAdapter:
                 merged = merge_pause_turns(calls)  # the paused calls were billed and stay in the evidence
                 return outcome.model_copy(update={
                     "cost_incurred": CostIncurred.YES, "native_response": merged,
-                    "observations": _observations(config, merged.get("usage") or {},
-                                                  search=_summed_search(calls) if searching else None),
+                    "observations": after_failed_resume(
+                        _observations(config, merged.get("usage") or {},
+                                      search=_summed_search(calls) if searching else None), outcome.cost_incurred),
                     "error": {**(outcome.error or {}), "after_pause_turns": len(calls)}})
             data, header_id = outcome
             calls.append(data)

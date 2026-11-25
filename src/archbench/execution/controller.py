@@ -170,6 +170,10 @@ class Controller:
             if attempt.status is AttemptStatus.SUCCEEDED:
                 return True
             counted += not _rate_limited(plan.retry, attempt)
+            # retry_on decides first; backoff only paces the retries it allows.
+            if not may_retry(plan.retry, attempt, counted):
+                self.db.set_task_status(task.task_id, TaskStatus.FAILED, _failure_reason(attempt, attempt_no))
+                return False
             if _rate_limited(plan.retry, attempt):
                 if not waits:
                     # Waits for this run are used up; the task stays resumable by a later `bench run`.
@@ -181,10 +185,6 @@ class Controller:
                 self.db.set_task_status(task.task_id, TaskStatus.PENDING,
                                         f"rate limited on attempt {attempt_no}; waiting {wait:g}s before retrying")
                 self.sleep(wait)
-                continue
-            if not may_retry(plan.retry, attempt, counted):
-                self.db.set_task_status(task.task_id, TaskStatus.FAILED, _failure_reason(attempt, attempt_no))
-                return False
 
     # ----- one attempt -----------------------------------------------------------------------------
 
