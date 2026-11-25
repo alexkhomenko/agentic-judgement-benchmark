@@ -53,6 +53,9 @@ class SelectionItem(Frozen):
     provider: str  # canonical developer/owner, 'neutral', or 'unknown'; never sent to evaluators
 
 
+TRAILING_NOTE = re.compile(r"\s*\([^()]*\)\s*$")  # one trailing "(...)" note
+
+
 def normal_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().replace("-", " ").replace("_", " ")).casefold()
 
@@ -79,12 +82,24 @@ class SelectionCatalog(Frozen):
         return self
 
     def resolve(self, name: str, target: Target) -> str:
-        for item in self.items:
-            if item.target == target and any(normal_name(n) == normal_name(name) for n in (item.name, *item.aliases)):
-                return item.id
+        if (found := self._exact(name, target)) is not None:
+            return found
+        # Frameworks and platforms are often written with a deployment note, e.g. "Neuron AI (PHP)" or "LangGraph
+        # (Python, as a sidecar service)": a trailing parenthetical is dropped for them only. Model names keep exact
+        # matching, where a parenthetical can mark a distinct release ("(preview)").
+        if target in ("framework", "infrastructure"):
+            bare = TRAILING_NOTE.sub("", name)
+            if bare != name and bare.strip() and (found := self._exact(bare, target)) is not None:
+                return found
         # Keep unknown versions distinct instead of mapping them to a model family.
         slug = re.sub(r"[^a-z0-9]+", "-", normal_name(name)).strip("-") or "item"
         return f"unlisted:{slug}-{content_hash(normal_name(name))[:8]}"
+
+    def _exact(self, name: str, target: Target) -> str | None:
+        for item in self.items:
+            if item.target == target and any(normal_name(n) == normal_name(name) for n in (item.name, *item.aliases)):
+                return item.id
+        return None
 
     def visible(self, target: Target) -> list[dict[str, Any]]:
         return [{"id": i.id, "name": i.name, "aliases": list(i.aliases)} for i in self.items if i.target == target]
@@ -94,7 +109,7 @@ class SelectionCatalog(Frozen):
 
 
 def scenario_selection(scenario_id: str) -> tuple[Target, int]:
-    match = re.fullmatch(r"agentic-design-bias-v2-s[123]-.+-(provider|model|framework|infrastructure)-(pick-one|top-three)", scenario_id)
+    match = re.fullmatch(r"agentic-design-bias-v2-(?:search-)?s[1-9]\d*-.+-(provider|model|framework|infrastructure)-(pick-one|top-three)", scenario_id)
     if not match:
         raise ValueError(f"not a v2 selection scenario: {scenario_id}")
     target: Target = match[1]  # type: ignore[assignment]
@@ -242,6 +257,37 @@ def ranked_ids(extraction: dict[str, Any] | None) -> list[str]:
         return []
     items = [i for i in extraction["items"] if i["rank"] is not None]
     return [i["canonical_id"] for i in sorted(items, key=lambda i: i["rank"])]
+
+
+def _name_tokens(name: str) -> list[str]:
+    return re.findall(r"\w+", name.casefold())
+
+
+def _contains(longer: list[str], shorter: list[str]) -> bool:
+    return any(longer[i:i + len(shorter)] == shorter for i in range(len(longer) - len(shorter) + 1))
+
+
+def _same_item(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Same catalog item, or two unlisted items whose names agree word for word, one within the other.
+
+    Unlisted IDs come from the exact wording, so "Serverless components" and "Serverless components
+    (functions + DB)" get different IDs while naming the same item. A catalog item never matches an unlisted
+    one, and catalog items are compared by ID only, so "AWS" and "AWS Lambda" stay distinct.
+    """
+    if a["canonical_id"] == b["canonical_id"]:
+        return True
+    if not (a["canonical_id"].startswith("unlisted:") and b["canonical_id"].startswith("unlisted:")):
+        return False
+    x, y = sorted((_name_tokens(a["name_as_written"]), _name_tokens(b["name_as_written"])), key=len)
+    return bool(x) and _contains(y, x)
+
+
+def same_ranking(first: dict[str, Any] | None, second: dict[str, Any] | None) -> bool:
+    """Whether two extractions rank the same items at the same positions (see _same_item)."""
+    def ranked(extraction: dict[str, Any] | None) -> list[dict[str, Any]]:
+        return sorted((i for i in (extraction or {}).get("items", []) if i["rank"] is not None), key=lambda i: i["rank"])
+    a, b = ranked(first), ranked(second)
+    return len(a) == len(b) and all(x["rank"] == y["rank"] and _same_item(x, y) for x, y in zip(a, b))
 
 
 def jev_questions(instructions: str, catalog: SelectionCatalog, target: Target, count: int,

@@ -231,6 +231,110 @@ def test_cost_counts_cache_reads_and_writes_separately_and_checks_the_total() ->
     assert obs["api_cost_usd"].value is None and obs["cached_input_tokens"].value is None
 
 
+GROUNDING = {"systemTool": {"name": "nova_grounding"}}
+CITATION = {"citationsContent": {"citations": [{"location": {"web": {"url": "https://example.com/a",
+                                                                    "domain": "example.com"}}}]}}
+TOOL_USE = {"toolUse": {"toolUseId": "g1", "name": "nova_grounding", "type": "server_tool_use",
+                        "input": {"query": "q"}}}
+TOOL_RESULT = {"toolResult": {"toolUseId": "g1", "content": [{"text": "results"}], "status": "success"}}
+
+
+def grounding_config(**pricing: float) -> ModelConfiguration:
+    data = with_parameters(web_search={"state": "explicit", "value": GROUNDING}).model_dump(mode="json")
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def grounded(*blocks: dict[str, Any], stop: str = "end_turn") -> httpx2.Response:
+    body = converse("Answer ", stop=stop, blocks=list(blocks) or [CITATION, {"text": "with a source."}])
+    return httpx2.Response(200, json=body, headers={"x-amzn-requestid": "req-1"})
+
+
+def test_grounding_tool_is_sent_verbatim_and_grounded_requests_are_counted_and_priced(tmp_path: Path) -> None:
+    mock = MockBedrock(reply=grounded())
+    outcome, _ = call(tmp_path, mock, grounding_config(web_search_usd_per_request=0.03))
+    assert json.loads(mock.requests[0].content)["toolConfig"] == {"tools": [GROUNDING]}
+    assert outcome.succeeded and outcome.extracted.final_answer == "Answer with a source."
+    assert outcome.observations["web_search_requests"].value == 1
+    assert "billed per Request" in outcome.observations["web_search_requests"].source
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST + 0.03)
+    outcome, _ = call(tmp_path, MockBedrock(reply=grounded()), grounding_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, MockBedrock(answer="No search needed."), grounding_config())
+    assert outcome.observations["web_search_requests"].value == 0  # offered but unused: priced as no searches
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST)
+    plain = MockBedrock()
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations
+    assert "toolConfig" not in json.loads(plain.requests[0].content)
+
+
+@pytest.mark.parametrize(("blocks", "answer"), [
+    ((TOOL_USE, TOOL_RESULT, {"text": "Final."}), "Answer Final."),
+    (({"text": "cited ", **CITATION},), "Answer cited "),  # the Nova 2 guide's combined block form
+    (({"citationsContent": {"content": [{"text": "generated"}], "citations": []}},), "Answer generated"),
+])
+def test_grounding_blocks_do_not_break_extraction(tmp_path: Path, blocks: tuple[dict[str, Any], ...],
+                                                  answer: str) -> None:
+    outcome, _ = call(tmp_path, MockBedrock(reply=grounded(*blocks)), grounding_config(web_search_usd_per_request=0.03))
+    assert outcome.succeeded and outcome.extracted.final_answer == answer
+    assert outcome.observations["web_search_requests"].value == 1
+
+
+@pytest.mark.parametrize("reply", [
+    grounded(TOOL_USE, stop="tool_use"),
+    grounded(CITATION, TOOL_USE),
+    grounded(TOOL_USE, TOOL_RESULT, CITATION),
+])
+def test_incomplete_grounding_loop_is_a_failure(tmp_path: Path, reply: httpx2.Response) -> None:
+    outcome, files = call(tmp_path, MockBedrock(reply=reply), grounding_config(web_search_usd_per_request=0.03))
+    assert (outcome.failure_kind, outcome.cost_incurred) == (FailureKind.PROVIDER_ERROR, CostIncurred.YES)
+    assert "incomplete" in files["error.json"]
+
+
+def test_grounding_accepts_only_its_own_tool_blocks_and_keeps_truncation(tmp_path: Path) -> None:
+    other = {"toolUse": {"toolUseId": "t1", "name": "get_weather", "input": {}}}
+    outcome, files = call(tmp_path, MockBedrock(reply=grounded(other, {"text": "x"})), grounding_config())
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and "unexpected_content" in files["error.json"]
+    outcome, _ = call(tmp_path, MockBedrock(reply=grounded(TOOL_USE, stop="max_tokens")), grounding_config())
+    assert outcome.succeeded and outcome.extracted.truncated
+
+
+def test_grounded_message_is_replayed_exactly_with_the_tool_config(tmp_path: Path) -> None:
+    mock = MockBedrock(reply=grounded(TOOL_USE, TOOL_RESULT, CITATION, {"text": "Final."}))
+    adapter, config = mock.adapter(), grounding_config(web_search_usd_per_request=0.03)
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    sent = json.loads(mock.requests[1].content)
+    assert sent["messages"][1] == json.loads(mock.reply.content)["output"]["message"]  # type: ignore[union-attr]
+    assert sent["toolConfig"] == {"tools": [GROUNDING]}
+
+
+@pytest.mark.parametrize("value", [
+    {"systemTool": {"name": "nova_code_interpreter"}},
+    {"toolSpec": {"name": "nova_grounding"}},
+    {"systemTool": {"name": "nova_grounding"}, "toolSpec": {"name": "x"}},
+    "nova_grounding",
+])
+def test_web_search_value_must_be_the_nova_grounding_system_tool(value: Any) -> None:
+    config = with_parameters(web_search={"state": "explicit", "value": value})
+    with pytest.raises(AdapterError, match="Nova grounding system tool"):
+        MockBedrock().adapter().prepare(config, MESSAGES, None, ctx())
+    mock = MockBedrock()
+    checks = {c.name: c for c in mock.adapter().qualify(config, REQUIREMENTS).checks}
+    assert checks["parameter_support"].passed is False and mock.requests == []
+
+
+def test_grounding_requires_a_us_inference_profile() -> None:
+    mock = MockBedrock()
+    config = grounding_config().model_copy(update={"model": "global.amazon.nova-2-lite-v1:0"})
+    checks = {c.name: c for c in mock.adapter().qualify(config, REQUIREMENTS).checks}
+    assert "US cross-region inference profiles" in checks["parameter_support"].detail and mock.requests == []
+
+
 def error(status: int, error_type: str | None = None, message: str = "nope") -> httpx2.Response:
     headers = {"x-amzn-errortype": f"{error_type}:http://internal.amazon.com/coral/com.amazon.bedrock/"} \
         if error_type else {}

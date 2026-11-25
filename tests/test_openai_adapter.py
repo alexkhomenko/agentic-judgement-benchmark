@@ -241,13 +241,139 @@ def test_continuation_replays_encrypted_reasoning_statelessly(tmp_path: Path) ->
         adapter.prepare(CONFIG, plain, None, ctx(2))
 
 
+SEARCH_TOOL = {"type": "web_search", "search_context_size": "medium"}
+BASE_COST = (800 * 0.10 + 200 * 0.01 + 500 * 0.50) / 1e6
+CITED = "Use Claude ([example.com](https://example.com/?utm_source=openai))."
+
+
+def searching_config(**pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def search_call(n: int, action: str = "search", status: str = "completed") -> dict[str, Any]:
+    act: dict[str, Any] = ({"type": "search", "queries": [f"query {n}"]} if action == "search"
+                           else {"type": action, "url": "https://example.com/"})
+    return {"id": f"ws_{n}", "type": "web_search_call", "status": status, "action": act}
+
+
+def searched(*, searches: int | None, text: str = CITED, model: str = "gpt-6-luna", **kwargs: Any) -> dict[str, Any]:
+    """Reasoning, two searches and one page open, then the cited answer; tool_usage reports `searches`."""
+    body = response(text, model=model, **kwargs)
+    reasoning, message = body["output"]
+    message["content"][0]["annotations"] = [{"type": "url_citation", "start_index": 10, "end_index": len(text) - 2,
+                                             "url": "https://example.com/?utm_source=openai", "title": "Example"}]
+    body["output"] = [reasoning, search_call(1), search_call(2, "open_page"), search_call(3), message]
+    body["tools"] = [SEARCH_TOOL]
+    if searches is not None:
+        body["tool_usage"] = {"image_gen": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                              "web_search": {"num_requests": searches}}
+    return body
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    rec = Recorder(ok(searched(searches=2)))
+    outcome, files = call(tmp_path, rec, config=searching_config(web_search_usd_per_request=0.01))
+    assert json.loads(rec.requests[0].content)["tools"] == [SEARCH_TOOL]
+    assert "tool_choice" not in json.loads(rec.requests[0].content)  # the model decides whether to search
+    assert outcome.succeeded and outcome.extracted.final_answer == CITED  # answer text only, no search items
+    native = json.loads(files["native-response.json"])
+    assert native["output"][4]["content"][0]["annotations"][0]["type"] == "url_citation"  # citations untouched
+    searches = outcome.observations["web_search_requests"]
+    assert (searches.value, searches.unit, searches.source) == (
+        2, "requests", "openai tool_usage.web_search.num_requests")
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST + 0.02)
+    # Missing rate: unknown cost, never silently zero.
+    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=2))), config=searching_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    # No tool_usage: count search actions (not page opens, not failed calls) from the output items.
+    body = searched(searches=None)
+    body["output"].insert(4, search_call(4, status="failed"))
+    outcome, _ = call(tmp_path, Recorder(ok(body)), config=searching_config(web_search_usd_per_request=0.01))
+    assert outcome.observations["web_search_requests"].value == 2
+    assert "counted from web_search_call" in outcome.observations["web_search_requests"].source
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST + 0.02)
+    # Offered but unused: zero searches, priced without a search rate.
+    outcome, _ = call(tmp_path, Recorder(ok(response(CITED))), config=searching_config())
+    assert outcome.observations["web_search_requests"].value == 0
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST)
+    # Without the parameter: no tools sent and no observation, even if the provider reported searches.
+    plain = Recorder(ok(searched(searches=2)))
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST)
+
+
+def _ends_after_search() -> dict[str, Any]:
+    body = searched(searches=1)
+    body["output"] = body["output"][:4]  # completed, but nothing after the last search
+    return body
+
+
+def _pending_search() -> dict[str, Any]:
+    body = searched(searches=1)
+    body["output"][3] = search_call(3, status="searching")
+    return body
+
+
+@pytest.mark.parametrize("body", [
+    _ends_after_search(),
+    _pending_search(),
+    searched(searches=3, status="incomplete", reason="max_messages"),
+])
+def test_unfinished_server_tool_loop_is_an_incomplete_failure(tmp_path: Path, body: dict[str, Any]) -> None:
+    outcome, _ = call(tmp_path, Recorder(ok(body)), config=searching_config(web_search_usd_per_request=0.01))
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES
+    assert outcome.observations["web_search_requests"].value is not None  # searches are still recorded
+
+
+def test_truncation_during_search_keeps_its_handling(tmp_path: Path) -> None:
+    body = searched(searches=2, text="partial", status="incomplete", reason="max_output_tokens")
+    outcome, _ = call(tmp_path, Recorder(ok(body)), config=searching_config(web_search_usd_per_request=0.01))
+    assert outcome.succeeded and outcome.extracted.truncated and outcome.extracted.final_answer == "partial"
+
+
+@pytest.mark.parametrize("value", [{"type": "web_search_preview"}, {"type": "function", "name": "web_search"},
+                                   "web_search", [SEARCH_TOOL]])
+def test_web_search_value_must_be_a_built_in_search_tool(value: Any) -> None:
+    data = searching_config().model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = value
+    with pytest.raises(AdapterError, match="web_search"):
+        Recorder(ok(response())).adapter().prepare(ModelConfiguration.model_validate(data), MESSAGES, None, ctx())
+
+
+def test_continuation_replays_search_items_statelessly(tmp_path: Path) -> None:
+    baseline = searched(searches=2)
+    rec = Recorder(ok(baseline), ok(response("branch a")), ok(response("branch b")))
+    adapter, config = rec.adapter(), searching_config(web_search_usd_per_request=0.01)
+    store = ArtifactStore(tmp_path / "results")
+    base = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base"))
+    snapshot = base.snapshot
+    assert base.succeeded and snapshot is not None
+    assert snapshot.messages[-1].content == CITED
+    for word in ("alpha", "beta"):
+        follow = snapshot.messages + (Message(role=Role.USER, content=f"Follow-up {word}"),)
+        assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink(f"child-{word}")).succeeded
+    for request, word in zip(rec.requests[1:], ("alpha", "beta")):
+        sent = json.loads(request.content)
+        assert sent["store"] is False and "previous_response_id" not in sent and sent["tools"] == [SEARCH_TOOL]
+        assert sent["input"][1:6] == baseline["output"]  # reasoning, search calls and cited message, unchanged
+        assert sent["input"][6] == {"role": "user", "content": f"Follow-up {word}"}
+    assert "alpha" not in rec.requests[2].content.decode()
+
+
 class MockOpenAI:
     """Models API plus Responses API, answering one-word probes and P6 picks."""
 
-    def __init__(self, *, encrypted: bool = True, answer: str = "1. **GPT-6 Luna**: fits the job.") -> None:
+    def __init__(self, *, encrypted: bool = True, answer: str = "1. **GPT-6 Luna**: fits the job.",
+                 search: bool = False) -> None:
         self.requests: list[httpx2.Request] = []
         self.encrypted = encrypted
         self.answer = answer
+        self.search = search  # answer with web_search_call items before the message
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
@@ -257,7 +383,10 @@ class MockOpenAI:
         body = json.loads(request.content)
         last = body["input"][-1]["content"]
         text = last.rsplit(" ", 1)[-1] if last.startswith("Reply with exactly one word") else self.answer
-        return ok(response(text, model=body["model"], encrypted="enc-xyz" if self.encrypted else None))
+        encrypted = "enc-xyz" if self.encrypted else None
+        if self.search:
+            return ok(searched(searches=2, text=text, model=body["model"], encrypted=encrypted))
+        return ok(response(text, model=body["model"], encrypted=encrypted))
 
 
 REQUIREMENTS = QualificationRequirements(baseline_prompt_chars=100, longest_follow_up_chars=0,
@@ -273,6 +402,17 @@ def test_qualification_probes_identity_and_stateless_branching() -> None:
     assert "encrypted reasoning" in checks["continuation"].detail
     assert len(report.probes) == 3
     assert all(API_KEY not in json.dumps(p) for p in report.probes)
+
+
+def test_qualification_accepts_web_search_and_replays_search_items() -> None:
+    mock = MockOpenAI(search=True)
+    report = OpenAIAdapter(api_key=API_KEY, transport_factory=lambda: httpx2.MockTransport(mock)).qualify(
+        searching_config(web_search_usd_per_request=0.01), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    posts = [json.loads(r.content) for r in mock.requests if r.method == "POST"]
+    assert len(posts) == 3 and all(p["tools"] == [SEARCH_TOOL] for p in posts)
+    assert any(i.get("type") == "web_search_call" for i in posts[1]["input"])  # probe branch replayed them
 
 
 def test_qualification_fails_without_replayable_reasoning() -> None:

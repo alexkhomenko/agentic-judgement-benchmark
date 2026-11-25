@@ -8,7 +8,9 @@ database writer; evidence is durable on disk before an attempt is marked complet
 
 from __future__ import annotations
 
+import time
 from collections import Counter
+from collections.abc import Callable
 
 from pydantic import Field
 
@@ -17,6 +19,7 @@ from ..adapters.registry import AdapterRegistry
 from ..domain.common import Frozen, new_id, sha256_text, utc_now
 from ..domain.execution import (
     AttemptStatus,
+    FailureKind,
     CandidateResponse,
     InvocationAttempt,
     ResponseTask,
@@ -75,19 +78,28 @@ def build_conversation(scenario: Scenario, round_number: int, parent: Continuati
     return parent.messages + (Message(role=Role.USER, content=spec.prompt),)
 
 
+def _rate_limited(policy: RetryPolicy, attempt: InvocationAttempt) -> bool:
+    return bool(policy.rate_limit_backoff_s) and attempt.failure_kind is FailureKind.RATE_LIMITED
+
+
+def counted_attempts(policy: RetryPolicy, attempts: list[InvocationAttempt]) -> int:
+    """Attempts that consume max_attempts: all of them, except rate-limited ones when backoff is configured."""
+    return sum(not _rate_limited(policy, a) for a in attempts)
+
+
 def may_retry(policy: RetryPolicy, last: InvocationAttempt, attempts_used: int) -> bool:
-    return (
-        last.status is not AttemptStatus.SUCCEEDED
-        and last.failure_kind in policy.retry_on
-        and attempts_used < policy.max_attempts
-    )
+    if last.status is AttemptStatus.SUCCEEDED or last.failure_kind not in policy.retry_on:
+        return False
+    return _rate_limited(policy, last) or attempts_used < policy.max_attempts
 
 
 class Controller:
-    def __init__(self, db: Database, store: ArtifactStore, adapters: AdapterRegistry) -> None:
+    def __init__(self, db: Database, store: ArtifactStore, adapters: AdapterRegistry,
+                 sleep: Callable[[float], None] = time.sleep) -> None:
         self.db = db
         self.store = store
         self.adapters = adapters
+        self.sleep = sleep
 
     def run(self, plan: ExperimentPlan) -> RunSummary:
         with self.store.lock(plan.experiment_id):
@@ -146,18 +158,32 @@ class Controller:
         if self.db.response_for_task(task.task_id) is not None:
             return True
         prior = self.db.list_attempts(task_id=task.task_id)
-        if prior and not may_retry(plan.retry, prior[-1], len(prior)):
+        counted = counted_attempts(plan.retry, prior)
+        if prior and not may_retry(plan.retry, prior[-1], counted):
             self.db.set_task_status(task.task_id, TaskStatus.FAILED, _failure_reason(prior[-1], len(prior)))
             return False
         messages = build_conversation(plan.scenario, task.round, parent)
-        attempts_used = len(prior)
+        attempt_no, waits = len(prior), list(plan.retry.rate_limit_backoff_s)
         while True:
-            attempts_used += 1
-            attempt = self._attempt(plan, binding, adapter, task, messages, parent, attempts_used)
+            attempt_no += 1
+            attempt = self._attempt(plan, binding, adapter, task, messages, parent, attempt_no)
             if attempt.status is AttemptStatus.SUCCEEDED:
                 return True
-            if not may_retry(plan.retry, attempt, attempts_used):
-                self.db.set_task_status(task.task_id, TaskStatus.FAILED, _failure_reason(attempt, attempts_used))
+            counted += not _rate_limited(plan.retry, attempt)
+            if _rate_limited(plan.retry, attempt):
+                if not waits:
+                    # Waits for this run are used up; the task stays resumable by a later `bench run`.
+                    self.db.set_task_status(task.task_id, TaskStatus.FAILED,
+                                            _failure_reason(attempt, attempt_no) + " (rate-limit waits used up; "
+                                            "a later run resumes it)")
+                    return False
+                wait = waits.pop(0)
+                self.db.set_task_status(task.task_id, TaskStatus.PENDING,
+                                        f"rate limited on attempt {attempt_no}; waiting {wait:g}s before retrying")
+                self.sleep(wait)
+                continue
+            if not may_retry(plan.retry, attempt, counted):
+                self.db.set_task_status(task.task_id, TaskStatus.FAILED, _failure_reason(attempt, attempt_no))
                 return False
 
     # ----- one attempt -----------------------------------------------------------------------------

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, SerializerFunctionWrapHandler, model_serializer
 
 from .common import ARTIFACT_SCHEMA_VERSION, PLAN_SCHEMA_VERSION, Frozen, content_hash
 from .configuration import ModelConfiguration
@@ -45,6 +45,19 @@ class RetryPolicy(Frozen):
         FailureKind.INTERRUPTED,
     )
     selection: Literal["first_success"] = "first_success"
+    # Waits (seconds) before retrying after a rate-limited attempt, one entry per wait; the last entry repeats
+    # no further. When set, rate-limited attempts do not consume max_attempts: within one `bench run` they are
+    # bounded by the number of waits, and a later `bench run` may resume a task whose last attempt was rate
+    # limited. Empty: rate limits are ordinary retryable failures that consume max_attempts immediately.
+    rate_limit_backoff_s: tuple[float, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_backoff(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Plans frozen before this field existed must keep their content hash, so it is serialized only when set.
+        data: dict[str, Any] = handler(self)
+        if not self.rate_limit_backoff_s:
+            data.pop("rate_limit_backoff_s", None)
+        return data
 
 
 class SchedulingPolicy(Frozen):

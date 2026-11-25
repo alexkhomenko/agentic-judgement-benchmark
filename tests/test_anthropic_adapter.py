@@ -127,6 +127,102 @@ def test_cost_is_computed_from_configured_pricing(tmp_path: Path) -> None:
     assert outcome.observations["api_cost_usd"].missing_reason == "no pricing in configuration"
 
 
+SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
+
+
+def searching_config(**pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def searched(*, searches: int | None, stop: str = "end_turn") -> dict[str, Any]:
+    body = message(stop=stop)
+    body["content"] = [
+        {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}},
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1",
+         "content": [{"type": "web_search_result", "url": "https://example.com", "title": "T",
+                      "encrypted_content": "enc"}]},
+        {"type": "text", "text": "Answer "},
+        {"type": "text", "text": "with a citation.", "citations": [{"type": "web_search_result_location",
+                                                                   "url": "https://example.com", "cited_text": "x"}]},
+    ]
+    if searches is not None:
+        body["usage"]["server_tool_use"] = {"web_search_requests": searches}
+    return body
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    rec = Recorder(ok(searched(searches=2)))
+    outcome, _ = call(tmp_path, rec, config=searching_config(web_search_usd_per_request=0.01))
+    assert json.loads(rec.requests[0].content)["tools"] == [SEARCH_TOOL]
+    assert outcome.succeeded and outcome.extracted.final_answer == "Answer with a citation."
+    assert outcome.observations["web_search_requests"].value == 2
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(0.004 + 0.01 + 0.02)
+    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=2))), config=searching_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=None))), config=searching_config())
+    assert outcome.observations["web_search_requests"].value == 0  # offered but unused: priced as no searches
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(0.014)
+    plain = Recorder(ok(message()))
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+
+
+def test_paused_server_tool_loop_still_paused_after_the_resumes_is_an_incomplete_failure(tmp_path: Path) -> None:
+    rec = Recorder(ok(searched(searches=5, stop="pause_turn")))
+    outcome, files = call(tmp_path, rec, config=searching_config())
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES
+    assert len(rec.requests) == 4 and len(json.loads(files["wire-exchanges.json"])) == 4  # 3 resumes by default
+    assert outcome.observations["web_search_requests"].value == 20  # every billed call counts
+
+
+def test_paused_turn_is_resumed_with_its_content_and_usage_is_summed(tmp_path: Path) -> None:
+    paused = searched(searches=3, stop="pause_turn")
+    paused["content"] = paused["content"][:2] + [{"type": "text", "text": "Searching. "}]
+    final = message("Final answer.")
+    final["content"] = [{"type": "text", "text": "Final answer."}]
+    final["usage"]["server_tool_use"] = {"web_search_requests": 1}
+    rec = Recorder(ok(paused), ok(final))
+    outcome, files = call(tmp_path, rec, config=searching_config(web_search_usd_per_request=0.01))
+    assert outcome.succeeded and outcome.extracted.final_answer == "Searching. Final answer."
+    first, second = (json.loads(r.content) for r in rec.requests)
+    assert second["messages"][:-1] == first["messages"]  # no extra user turn
+    assert second["messages"][-1] == {"role": "assistant", "content": paused["content"]}
+    assert second["tools"] == first["tools"]
+    obs = outcome.observations
+    assert (obs["input_tokens"].value, obs["output_tokens"].value, obs["web_search_requests"].value) == (2000, 1000, 4)
+    assert obs["api_cost_usd"].value == pytest.approx(2 * 0.014 + 4 * 0.01)
+    native = json.loads(files["native-response.json"])
+    assert native["content"] == paused["content"] + final["content"]
+    assert native["harness_pause_turns"] == [paused]
+
+
+def test_a_failed_resume_keeps_the_billed_paused_call(tmp_path: Path) -> None:
+    error = ok({"type": "error", "error": {"type": "overloaded_error", "message": "x"}}, 529)
+    outcome, _ = call(tmp_path, Recorder(ok(searched(searches=2, stop="pause_turn")), error), config=searching_config())
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.TRANSIENT_TRANSPORT
+    assert outcome.cost_incurred is CostIncurred.YES
+    assert outcome.observations["web_search_requests"].value == 2
+
+
+def test_resumes_can_be_turned_off(tmp_path: Path) -> None:
+    data = searching_config().model_dump(mode="json")
+    data["adapter_options"]["pause_turn_max_resumes"] = 0
+    rec = Recorder(ok(searched(searches=5, stop="pause_turn")))
+    outcome, _ = call(tmp_path, rec, config=ModelConfiguration.model_validate(data))
+    assert not outcome.succeeded and len(rec.requests) == 1
+
+
+def test_web_search_value_must_be_a_server_search_tool() -> None:
+    data = searching_config().model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = {"type": "custom", "name": "web_search"}
+    with pytest.raises(AdapterError):
+        Recorder(ok(message())).adapter().prepare(ModelConfiguration.model_validate(data), MESSAGES, None, ctx())
+
+
 @pytest.mark.parametrize(
     ("response", "kind", "cost"),
     [

@@ -269,6 +269,48 @@ def cmd_cross_report(ws: Workspace, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(ws: Workspace, args: argparse.Namespace) -> int:
+    from .reporting.matrix import build_matrix, render_html
+
+    targets = ws.project / args.targets
+    if args.out:
+        data = build_matrix(ws.db, ws.store, ws.project, targets)
+        Path(args.out).write_text(render_html(data))
+        print(f"wrote {args.out}")
+        return 0
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server naming
+            if self.path not in ("/", "/data.json"):
+                self.send_error(404)
+                return
+            try:
+                data = build_matrix(ws.db, ws.store, ws.project, targets)
+                body = (json.dumps(data) if self.path == "/data.json" else render_html(data, refresh_s=60)).encode()
+                kind = "application/json" if self.path == "/data.json" else "text/html; charset=utf-8"
+            except Exception as exc:  # keep serving; show the problem instead of dying mid-campaign
+                body, kind = f"matrix error: {type(exc).__name__}: {exc}".encode(), "text/plain; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", args.port), Handler)  # one thread: the SQLite connection is per-thread
+    print(f"matrix: http://127.0.0.1:{args.port}/  (refreshes every 60s; Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def cmd_inspect(ws: Workspace, args: argparse.Namespace) -> int:
     attempt = ws.db.get_attempt(args.attempt_id)
     task = ws.db.get_task(attempt.task_id)
@@ -371,6 +413,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--evaluation", required=True)
     p.set_defaults(func=cmd_report)
 
+    p = sub.add_parser("matrix", help="live question x model progress page: answers done / target, spend, projection")
+    p.add_argument("--targets", default="configs/experiments/agentic-design-bias-v2/targets.yaml")
+    p.add_argument("--port", type=int, default=8767)
+    p.add_argument("--out", default=None, help="write a static HTML file instead of serving")
+    p.set_defaults(func=cmd_matrix)
     p = sub.add_parser("cross-report", help="write a static HTML report comparing models across evaluation runs")
     p.add_argument("evaluation_run_ids", nargs="+", help="one evaluation run per probe and model")
     p.add_argument("--out", required=True, help="HTML file to write")

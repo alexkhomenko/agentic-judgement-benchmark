@@ -37,13 +37,32 @@ Configuration parameters (all others are rejected at qualification):
     reasoning           explicit or omitted  -> additionalModelRequestFields.reasoningConfig.type ("enabled"|"disabled")
     reasoning_effort    explicit or omitted  -> additionalModelRequestFields.reasoningConfig.maxReasoningEffort
                                                 ("low"|"medium"|"high"; requires reasoning "enabled")
+    web_search          explicit or omitted  -> toolConfig.tools: [value] (Nova Web Grounding system tool, sent
+                                                verbatim: {systemTool: {name: nova_grounding}})
     * With reasoning_effort "high", AWS requires maxTokens, temperature, topP and topK to be unset, so
       max_output_tokens must then be omitted.
 adapter_options:
     region: AWS Region (required)                timeout_s: 3600 (default; AWS recommends at least 3600)
     max_output_tokens_limit: the model's documented maximum output (required)
     pricing: {input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok,
-              source, verified_on}
+              web_search_usd_per_request?, source, verified_on}
+
+NOVA WEB GROUNDING (verified 2026-11-24; https://docs.aws.amazon.com/nova/latest/nova2-userguide/web-grounding.html,
+https://docs.aws.amazon.com/nova/latest/nova2-userguide/code-library.html#nova-grounding, AWS Price List API
+AmazonBedrock us-east-1 publicationDate 2026-11-23 usage type USE1-Nova2.0Lite-nova-grounding):
+- Only US Regions and US cross-region inference profiles (`us.` ids); qualification rejects other ids. The caller's
+  IAM identity needs bedrock:InvokeTool on arn:aws:bedrock::{account}:system-tool/amazon.nova_grounding, which
+  AmazonBedrockLimitedAccess (the policy behind Bedrock API keys) does not grant.
+- The model decides whether to search and may search several times inside one Converse call.
+- Billing unit is one "Request" ($0.03 for Nova 2 Lite in us-east-1). Converse usage reports no search count, so
+  web_search_requests is 1 when the returned message shows grounding (citationsContent blocks, or toolUse /
+  toolResult blocks for nova_grounding) and 0 otherwise; web_search_usd_per_request is the per-Request price.
+- Grounded responses interleave `text` and `citationsContent` blocks; toolUse / toolResult blocks are accepted only
+  for nova_grounding. The final answer is the text blocks plus any generated text inside citationsContent.content;
+  citations stay in the native response, and the whole message is replayed unchanged on continuation (AWS does
+  not document how system-tool blocks must be replayed).
+- stopReason `tool_use`, or `end_turn` without final answer text after the last tool block, is an incomplete
+  failure. `max_tokens` keeps the truncation handling.
 """
 
 from __future__ import annotations
@@ -85,8 +104,11 @@ API_KEY_REGIONS = frozenset({
     "eu-west-1", "eu-west-2", "eu-west-3", "sa-east-1", "us-east-1", "us-gov-east-1", "us-gov-west-1", "us-west-2",
 })
 PROFILE_PREFIX = re.compile(r"^(us|us-gov|eu|apac|jp|au|ca|global)\.")
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "temperature", "top_p", "top_k", "reasoning", "reasoning_effort"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "temperature", "top_p", "top_k", "reasoning", "reasoning_effort",
+                                  "web_search"})
 CONTENT_TYPES = frozenset({"text", "reasoningContent"})
+GROUNDING_TOOL = "nova_grounding"
+GROUNDING_CONTENT_TYPES = CONTENT_TYPES | {"citationsContent", "toolUse", "toolResult"}
 REDACTED_REASONING = "[REDACTED]"
 CONTENT_FILTER_TEXT = "blocked by our content filters"
 TransportFactory = Callable[[], httpx2.BaseTransport]
@@ -341,6 +363,10 @@ class BedrockAdapter:
             extra["inferenceConfig"] = {"topK": top_k}
         if extra:
             body["additionalModelRequestFields"] = extra
+        if (web_search := explicit(config, "web_search")) is not None:
+            if problem := _web_search_problem(web_search):
+                raise AdapterError(FailureKind.INVALID_STATE, problem)
+            body["toolConfig"] = {"tools": [copy.deepcopy(web_search)]}
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -390,7 +416,8 @@ class BedrockAdapter:
             raise AdapterError(FailureKind.HARNESS_ERROR, "request body on the wire differs from the prepared body",
                                CostIncurred.YES)
         data = response.json()
-        observations = _observations(config, data)
+        searching = "toolConfig" in body
+        observations = _observations(config, data, searching=searching)
         reason = data.get("stopReason")
 
         def failure(kind: FailureKind, error: dict[str, Any], cost: CostIncurred = CostIncurred.YES
@@ -407,15 +434,24 @@ class BedrockAdapter:
             return failure(FailureKind.REFUSAL, {"type": "stop_reason", "reason": reason})
         if reason == "model_context_window_exceeded":
             return failure(FailureKind.CONTEXT_EXCEEDED, {"type": "stop_reason", "reason": reason})
+        if searching and reason == "tool_use":
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                        "detail": "response ended on a tool use without a final answer"})
         if reason not in ("end_turn", "max_tokens"):  # tool_use, stop_sequence (none sent), malformed_*, undocumented
             return failure(FailureKind.PROVIDER_ERROR, {"type": "stop_reason", "reason": reason})
         returned = _output_message(data)
         content = returned.get("content")
         if returned.get("role") != "assistant" or not isinstance(content, list) or not content:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "no_message"})
-        if any(not isinstance(b, dict) or len(b) != 1 or next(iter(b)) not in CONTENT_TYPES for b in content):
+        valid = _grounded_block if searching else _plain_block
+        if not all(valid(b) for b in content):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "unexpected_content", "content_types": sorted(
                 {",".join(sorted(b)) if isinstance(b, dict) else type(b).__name__ for b in content})})
+        if searching and reason == "end_turn":
+            last_tool = max((i for i, b in enumerate(content) if "toolUse" in b or "toolResult" in b), default=-1)
+            if not _answer_text(content[last_tool + 1:]):
+                return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                            "detail": "response ended without final answer text"})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason,
                                request_id=request_id, cost_incurred=CostIncurred.YES, observations=observations)
 
@@ -424,7 +460,7 @@ class BedrockAdapter:
         if execution.status != "completed" or data is None:
             raise AdapterError(FailureKind.HARNESS_ERROR, "cannot extract from a failed execution")
         content = _output_message(data).get("content") or []
-        text = "".join(str(b["text"]) for b in content if "text" in b)
+        text = _answer_text(content)
         thoughts = [str((b["reasoningContent"].get("reasoningText") or {}).get("text") or "")
                     for b in content if "reasoningContent" in b]
         visible = "".join(t for t in thoughts if t != REDACTED_REASONING)
@@ -476,12 +512,59 @@ def _output_message(data: Mapping[str, Any]) -> dict[str, Any]:
     return message if isinstance(message, dict) else {}
 
 
+def _plain_block(block: Any) -> bool:
+    return isinstance(block, dict) and len(block) == 1 and next(iter(block)) in CONTENT_TYPES
+
+
+def _grounded_block(block: Any) -> bool:
+    """A content block allowed in a grounded response. The Nova 2 guide's example puts `text` and
+    `citationsContent` in one block (the API reference says ContentBlock is a union), so both forms pass."""
+    if not isinstance(block, dict) or not block or not set(block) <= GROUNDING_CONTENT_TYPES:
+        return False
+    if len(block) > 1:
+        return set(block) == {"text", "citationsContent"}
+    tool_use = block.get("toolUse")
+    return tool_use is None or (isinstance(tool_use, dict) and tool_use.get("name") == GROUNDING_TOOL)
+
+
+def _answer_text(content: list[Any]) -> str:
+    """Final answer: text blocks, plus generated text a citationsContent block carries in its `content`."""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if "text" in block:
+            parts.append(str(block["text"]))
+        elif isinstance(cited := block.get("citationsContent"), dict):
+            parts += [str(c["text"]) for c in cited.get("content") or [] if isinstance(c, dict) and "text" in c]
+    return "".join(parts)
+
+
+def _grounded(content: Any) -> bool:
+    """Whether the returned message shows that Web Grounding ran (citations or a nova_grounding tool use)."""
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and ("citationsContent" in b or (
+            isinstance(b.get("toolUse"), dict) and b["toolUse"].get("name") == GROUNDING_TOOL)) for b in content)
+
+
+def _web_search_problem(value: Any) -> str | None:
+    tool = value.get("systemTool") if isinstance(value, dict) and len(value) == 1 else None
+    if not isinstance(tool, dict) or tool.get("name") != GROUNDING_TOOL:
+        return f"web_search must be the Nova grounding system tool: {{systemTool: {{name: {GROUNDING_TOOL}}}}}"
+    return None
+
+
 def _parameter_problem(config: ModelConfiguration) -> str | None:
     if config.model.startswith("arn:"):
         return "use a model or inference profile id, not an ARN"
     names = {n for n, s in config.parameters.items() if s.state is ParameterState.EXPLICIT}
     if unsupported := sorted(names - SUPPORTED_PARAMETERS):
         return f"unsupported: {unsupported}"
+    if "web_search" in names:
+        if problem := _web_search_problem(explicit(config, "web_search")):
+            return problem
+        if not config.model.startswith("us."):
+            return "web_search (Nova Web Grounding) is supported only through US cross-region inference profiles"
     reasoning, effort = explicit(config, "reasoning"), explicit(config, "reasoning_effort")
     if reasoning is not None and reasoning not in ("enabled", "disabled"):
         return "reasoning must be 'enabled' or 'disabled'"
@@ -548,7 +631,8 @@ def _http_failure(status: int, error_type: str | None, message: str = "") -> tup
     return FailureKind.PROVIDER_ERROR, CostIncurred.NO
 
 
-def _observations(config: ModelConfiguration, data: Mapping[str, Any]) -> dict[str, Observation]:
+def _observations(config: ModelConfiguration, data: Mapping[str, Any], *, searching: bool = False
+                  ) -> dict[str, Observation]:
     source = "bedrock usage"
     raw = data.get("usage")
     usage: dict[str, Any] = raw if isinstance(raw, dict) else {}
@@ -570,6 +654,12 @@ def _observations(config: ModelConfiguration, data: Mapping[str, Any]) -> dict[s
     obs["provider_latency_ms"] = (Observation(value=int(latency), unit="ms", source="bedrock metrics.latencyMs")
                                   if isinstance(latency, int | float)
                                   else Observation.missing("ms", "bedrock metrics", "not reported"))
+    if searching:
+        grounded = _grounded(_output_message(data).get("content"))
+        obs["web_search_requests"] = Observation(
+            value=int(grounded), unit="requests",
+            source="bedrock output message: 1 grounded request if citationsContent or nova_grounding toolUse blocks "
+                   "are present (billed per Request; usage reports no search count)")
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -596,5 +686,10 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {key}")
         total += int(tokens) * rate / 1_000_000
+    if (searches := obs.get("web_search_requests")) and searches.value:
+        rate = pricing.get("web_search_usd_per_request")
+        if not isinstance(rate, int | float):
+            return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+        total += searches.value * rate
     return Observation(value=round(total, 10), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

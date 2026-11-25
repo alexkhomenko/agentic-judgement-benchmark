@@ -195,11 +195,12 @@ benchmark results. `bench qualify` makes three tiny live probe calls to prove br
 
 ## Agentic-design-bias probes
 
-The [v2 question set](scenarios/agentic-design-bias-v2/README.md) adds 24 independent,
+The [v2 question set](scenarios/agentic-design-bias-v2/README.md) adds 40 independent,
 requirement-conditioned questions for review: a personal family assistant, a swimming coach's
-greenfield SaaS, and an existing on-premises Java appointment application. Each situation asks for
+greenfield SaaS, an existing on-premises Java appointment application, an internal knowledge
+assistant, and supplier quotation processing in an existing PHP and MySQL application. Each situation asks for
 one choice or a ranked top three for model provider, model, agentic framework, and infrastructure.
-V2 execution and evaluation configs are not yet introduced; the workflow below describes v1.
+See the v2 question set for its run conditions and evaluation policy; the workflow below describes v1.
 
 `scenarios/agentic-design-bias/` holds six terse, independent single-round probes (P1–P6) that measure
 how models recommend agent architectures, frameworks, and models;

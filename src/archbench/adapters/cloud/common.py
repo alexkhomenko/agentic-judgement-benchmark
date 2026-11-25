@@ -3,6 +3,7 @@ and the in-memory sink that keeps qualification-probe evidence inside the qualif
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 from typing import Any
@@ -56,3 +57,32 @@ def failed(kind: FailureKind, error_type: str, message: str, cost: CostIncurred,
     return NativeExecution(status="failed", failure_kind=kind, cost_incurred=cost,
                            error={"type": error_type, "message": message, **extra},
                            request_id=extra.get("request_id"))
+
+
+def merge_pause_turns(bodies: list[dict[str, Any]]) -> dict[str, Any]:
+    """One body for a turn resumed after pause_turn: the last body, with the whole assistant content (each call
+    continues the previous one's content) and usage summed over every billed call; earlier bodies kept raw."""
+    if len(bodies) == 1:
+        return bodies[0]
+    merged = copy.deepcopy(bodies[-1])
+    merged["content"] = [copy.deepcopy(b) for body in bodies for b in body.get("content") or []]
+    merged["usage"] = sum_usage([body.get("usage") or {} for body in bodies])
+    merged["harness_pause_turns"] = copy.deepcopy(bodies[:-1])
+    return merged
+
+
+def sum_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Numeric usage fields summed, nested objects (server_tool_use, ...) summed key by key; a field missing from
+    some call is summed over the calls that report it."""
+    total: dict[str, Any] = {}
+    for usage in usages:
+        for key, value in usage.items():
+            if isinstance(value, bool):
+                total.setdefault(key, value)
+            elif isinstance(value, int | float):
+                total[key] = total.get(key, 0) + value
+            elif isinstance(value, dict):
+                total[key] = sum_usage([total.get(key) or {}, value])
+            else:
+                total.setdefault(key, value)
+    return total

@@ -32,11 +32,30 @@ Configuration parameters (all others are rejected at qualification):
     effort             explicit or omitted  -> output_config.effort ("low" | "medium" | "high" | "xhigh" | "max")
     thinking           explicit or omitted  -> thinking.type ("adaptive" | "disabled"; M3.1-Flash accepts only
                                                "adaptive")
+    web_search         explicit or omitted  -> tools: [value] (the server tool, sent verbatim:
+                                               {type: web_search_20250305, name: web_search})
 adapter_options:
+    pause_turn_max_resumes: 3 (default)   resumes of a paused server search loop before it counts as incomplete
     base_url: https://api.minimax.io/anthropic (default; mainland: https://api.minimax.cn/anthropic)
     timeout_s: 900 (default; MiniMax documents no non-streaming limit)
     pricing: {region, input_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok?,
-              output_usd_per_mtok, source, verified_on}
+              output_usd_per_mtok, web_search_usd_per_request?, source, verified_on}
+
+Web search (Server Tools, Beta; verified 2026-11-24, https://platform.minimax.io/docs/guides/server-tools): the
+`web_search` server tool runs on MiniMax's servers inside the one request; the model decides whether and how often
+to search. The content then holds `server_tool_use` (input.query) and `web_search_tool_result` blocks among the
+thinking and text blocks; continuation replays them unchanged with the rest of the content (MiniMax's own
+pause_turn guidance sends that content back as-is). The documented tool has no options (no max_uses). Usage in the
+documented example reports no search count, so web_search_requests is `usage.server_tool_use.web_search_requests`
+when present, else the number of `server_tool_use` blocks named web_search. MiniMax prices web_search at
+$0.01 per request (https://platform.minimax.io/docs/pricing/overview, Server Tools), read here as per search.
+`stop_reason: pause_turn` (the server search loop reached its limit before a final answer) is resumed as the
+Anthropic protocol documents: the same request is sent again with the paused assistant content appended (no extra
+user message), up to `adapter_options.pause_turn_max_resumes` times (default 3); still paused after that is an
+incomplete failure. A resumed turn's native response is the last body with `content` holding the whole assistant
+content and `usage` summed over every call, the earlier raw bodies under `harness_pause_turns`; searches are
+counted per call and summed. The final answer is the text blocks only, which include any lead-in text written before a search;
+search results stay in the native response.
 """
 
 from __future__ import annotations
@@ -64,7 +83,7 @@ from ..base import (
     QualificationReport,
     QualificationRequirements,
 )
-from .common import CollectingSink, context_check, explicit, failed
+from .common import CollectingSink, context_check, explicit, failed, merge_pause_turns
 from .wire import CapturingTransport, wire_record
 
 STATE_FORMAT = "minimax-messages-v1"
@@ -75,8 +94,10 @@ DEFAULT_TIMEOUT_S = 900
 MAX_OUTPUT_TOKENS = 524288
 PROBE_MAX_TOKENS = 2048
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "thinking"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "thinking", "web_search"})
 CONTENT_TYPES = frozenset({"text", "thinking"})
+SEARCH_CONTENT_TYPES = CONTENT_TYPES | {"server_tool_use", "web_search_tool_result"}
+DEFAULT_PAUSE_RESUMES = 3
 REQUEST_ID_HEADERS = ("trace-id",)  # equals the error body's request_id (seen 2026-11-16); else the response `id`
 # base_resp.status_code values from MiniMax's error-code table.
 BASE_RESP_FAILURES = {
@@ -255,6 +276,10 @@ class MiniMaxAdapter:
             body["output_config"] = {"effort": effort}
         if (thinking := explicit(config, "thinking")) is not None:
             body["thinking"] = {"type": thinking}
+        if (web_search := explicit(config, "web_search")) is not None:
+            if problem := _search_tool_problem(web_search):
+                raise AdapterError(FailureKind.INVALID_STATE, problem)
+            body["tools"] = [copy.deepcopy(web_search)]
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -281,29 +306,34 @@ class MiniMaxAdapter:
     def _execute(self, config: ModelConfiguration, prepared: PreparedInvocation, transport: CapturingTransport
                  ) -> NativeExecution:
         body = prepared.native_request["body"]
-        try:
-            with self._client(config, transport) as client:
-                response = client.post("v1/messages", content=json.dumps(body))
-        except AdapterError as exc:
-            return failed(FailureKind.PROVIDER_ERROR, "credentials", str(exc), CostIncurred.NO)
-        except httpx2.TimeoutException as exc:
-            return failed(FailureKind.AMBIGUOUS_TIMEOUT, "timeout", str(exc), CostIncurred.UNKNOWN)
-        except httpx2.TransportError as exc:
-            cost = CostIncurred.UNKNOWN if transport.exchanges else CostIncurred.NO
-            return failed(FailureKind.TRANSIENT_TRANSPORT, "connection", str(exc), cost)
-
-        header_id = _request_id(response.headers)
-        if response.status_code != 200:
-            error = _error_body(response)
-            kind, cost = _http_failure(response.status_code)
-            return failed(kind, f"http_{response.status_code}", str(error.get("message") or response.text)[:500], cost,
-                          status=response.status_code, provider_type=error.get("type"),
-                          request_id=header_id or error.get("request_id"))
-        if json.loads(transport.exchanges[-1]["request_body"]) != body:
-            raise AdapterError(FailureKind.HARNESS_ERROR, "request body on the wire differs from the prepared body",
-                               CostIncurred.YES)
-        data = response.json()
-        observations = _observations(config, data.get("usage") or {})
+        searching = "tools" in body
+        resumes = config.adapter_options.get("pause_turn_max_resumes", DEFAULT_PAUSE_RESUMES)
+        if not isinstance(resumes, int) or isinstance(resumes, bool) or resumes < 0:
+            raise AdapterError(FailureKind.INVALID_STATE, "pause_turn_max_resumes must be a non-negative integer")
+        calls: list[dict[str, Any]] = []
+        header_id: str | None = None
+        current = body
+        while True:
+            outcome = self._post(config, current, transport)
+            if isinstance(outcome, NativeExecution):
+                if not calls:
+                    return outcome
+                merged = merge_pause_turns(calls)  # the paused calls were billed and stay in the evidence
+                return outcome.model_copy(update={
+                    "cost_incurred": CostIncurred.YES, "native_response": merged,
+                    "observations": _observations(config, merged.get("usage") or {},
+                                                  search=_summed_search(calls) if searching else None),
+                    "error": {**(outcome.error or {}), "after_pause_turns": len(calls)}})
+            data, header_id = outcome
+            calls.append(data)
+            if not (searching and data.get("stop_reason") == "pause_turn") or len(calls) > resumes \
+                    or data.get("model") != config.model:
+                break
+            current = {**body, "messages": copy.deepcopy(body["messages"])
+                       + [{"role": "assistant", "content": copy.deepcopy(merge_pause_turns(calls)["content"])}]}
+        data = merge_pause_turns(calls)
+        observations = _observations(config, data.get("usage") or {},
+                                     search=_summed_search(calls) if searching else None)
         reason = data.get("stop_reason")
         request_id = header_id or data.get("id")
 
@@ -319,19 +349,52 @@ class MiniMaxAdapter:
             kind = BASE_RESP_FAILURES.get(code, FailureKind.PROVIDER_ERROR) if isinstance(code, int) \
                 else FailureKind.PROVIDER_ERROR
             return failure(kind, {"type": "base_resp", "status_code": code, "status_msg": base.get("status_msg")},
-                           CostIncurred.UNKNOWN)
+                           CostIncurred.YES if len(calls) > 1 else CostIncurred.UNKNOWN)
         if data.get("model") != config.model:
             return failure(FailureKind.PROVIDER_ERROR,
                            {"type": "model_mismatch", "requested": config.model, "served": data.get("model")})
+        if reason == "pause_turn" and searching:  # still paused after every resume
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                        "detail": f"server tool loop still paused after {resumes} "
+                                                                  "resumes"})
         if reason not in ("end_turn", "max_tokens"):  # tool_use, pause_turn (no tools are sent), undocumented
             return failure(FailureKind.PROVIDER_ERROR, {"type": "stop_reason", "reason": reason})
         content = data.get("content")
-        if not isinstance(content, list) or any(not isinstance(b, dict) or b.get("type") not in CONTENT_TYPES
+        allowed = SEARCH_CONTENT_TYPES if searching else CONTENT_TYPES
+        if not isinstance(content, list) or any(not isinstance(b, dict) or b.get("type") not in allowed
                                                 for b in content):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "unexpected_content", "content_types": sorted(
                 {str(b.get("type")) if isinstance(b, dict) else type(b).__name__ for b in content or []})})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason,
                                request_id=request_id, cost_incurred=CostIncurred.YES, observations=observations)
+
+    def _post(self, config: ModelConfiguration, body: dict[str, Any], transport: CapturingTransport
+              ) -> NativeExecution | tuple[dict[str, Any], str | None]:
+        """One Messages call: the response JSON and request id, or the failure."""
+        before = len(transport.exchanges)
+        try:
+            with self._client(config, transport) as client:
+                response = client.post("v1/messages", content=json.dumps(body))
+        except AdapterError as exc:
+            return failed(FailureKind.PROVIDER_ERROR, "credentials", str(exc), CostIncurred.NO)
+        except httpx2.TimeoutException as exc:
+            return failed(FailureKind.AMBIGUOUS_TIMEOUT, "timeout", str(exc), CostIncurred.UNKNOWN)
+        except httpx2.TransportError as exc:
+            cost = CostIncurred.UNKNOWN if len(transport.exchanges) > before else CostIncurred.NO
+            return failed(FailureKind.TRANSIENT_TRANSPORT, "connection", str(exc), cost)
+
+        header_id = _request_id(response.headers)
+        if response.status_code != 200:
+            error = _error_body(response)
+            kind, cost = _http_failure(response.status_code)
+            return failed(kind, f"http_{response.status_code}", str(error.get("message") or response.text)[:500], cost,
+                          status=response.status_code, provider_type=error.get("type"),
+                          request_id=header_id or error.get("request_id"))
+        if json.loads(transport.exchanges[-1]["request_body"]) != body:
+            raise AdapterError(FailureKind.HARNESS_ERROR, "request body on the wire differs from the prepared body",
+                               CostIncurred.YES)
+        data: dict[str, Any] = response.json()
+        return data, header_id
 
     def extract(self, execution: NativeExecution) -> ExtractedResponse:
         data = execution.native_response
@@ -401,7 +464,38 @@ def _parameter_problem(config: ModelConfiguration) -> str | None:
     thinking = explicit(config, "thinking")
     if thinking is not None and thinking not in ("adaptive", "disabled"):
         return "thinking must be 'adaptive' or 'disabled'"
+    web_search = explicit(config, "web_search")
+    return _search_tool_problem(web_search) if web_search is not None else None
+
+
+def _search_tool_problem(value: Any) -> str | None:
+    if (not isinstance(value, dict) or not str(value.get("type", "")).startswith("web_search_")
+            or value.get("name") != "web_search"):
+        return "web_search must be the web_search server tool {type: web_search_20250305, name: web_search}"
     return None
+
+
+def _summed_search(calls: list[dict[str, Any]]) -> Observation:
+    """Searches over every call of a (possibly resumed) turn, each counted on its own."""
+    counts = [_search_count(call) for call in calls]
+    if len(counts) == 1:
+        return counts[0]
+    return Observation(value=sum(int(c.value or 0) for c in counts), unit="requests",
+                       source=f"summed over {len(counts)} calls: " + "; ".join(sorted({c.source for c in counts})))
+
+
+def _search_count(data: dict[str, Any]) -> Observation:
+    """Searches in one response: the usage count if MiniMax reports one, else the server_tool_use blocks."""
+    usage = data.get("usage")
+    server = usage.get("server_tool_use") if isinstance(usage, dict) else None
+    reported = server.get("web_search_requests") if isinstance(server, dict) else None
+    if isinstance(reported, int):
+        return Observation(value=reported, unit="requests", source="minimax usage: server_tool_use.web_search_requests")
+    content = data.get("content")
+    calls = [b for b in content if isinstance(b, dict) and b.get("type") == "server_tool_use"
+             and b.get("name") == "web_search"] if isinstance(content, list) else []
+    return Observation(value=len(calls), unit="requests",
+                       source="counted from server_tool_use web_search blocks (usage reports no search count)")
 
 
 def _request_id(headers: Mapping[str, str]) -> str | None:
@@ -435,7 +529,8 @@ def _http_failure(status: int) -> tuple[FailureKind, CostIncurred]:
     return FailureKind.PROVIDER_ERROR, CostIncurred.NO
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _observations(config: ModelConfiguration, usage: dict[str, Any], *, search: Observation | None = None
+                  ) -> dict[str, Observation]:
     source = "minimax usage"
     obs: dict[str, Observation] = {}
     for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
@@ -447,6 +542,8 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
     obs["reasoning_tokens"] = (
         Observation(value=int(thinking), unit="tokens", source=f"{source}: output_tokens_details.thinking_tokens")
         if thinking is not None else Observation.missing("tokens", source, "no thinking_tokens in usage"))
+    if search is not None:
+        obs["web_search_requests"] = search
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -473,5 +570,10 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {name}")
         total += int(tokens) * rate / 1_000_000
+    if (searches := obs.get("web_search_requests")) is not None and searches.value:
+        rate = pricing.get("web_search_usd_per_request")
+        if not isinstance(rate, int | float):
+            return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+        total += int(searches.value) * rate
     return Observation(value=round(total, 10), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

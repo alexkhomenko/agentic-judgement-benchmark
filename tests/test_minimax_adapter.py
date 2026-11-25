@@ -56,13 +56,20 @@ def message(text: str = "ok", *, thinking: dict[str, Any] | None = THINKING, sto
 
 class MockMiniMax:
     def __init__(self, *, answer: str = "1. **MiniMax-M3.1-Flash**: fits.", served: str | None = None,
-                 reply: httpx2.Response | Exception | None = None) -> None:
+                 reply: httpx2.Response | Exception | None = None,
+                 replies: list[httpx2.Response | Exception] | None = None) -> None:
         self.requests: list[httpx2.Request] = []
         self.answer, self.served, self.reply = answer, served, reply
+        self.replies = list(replies or [])  # served in order before falling back to reply
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         assert request.url.path == "/anthropic/v1/messages", request.url
+        if self.replies:
+            nxt = self.replies.pop(0)
+            if isinstance(nxt, Exception):
+                raise nxt
+            return nxt
         if isinstance(self.reply, Exception):
             raise self.reply
         if self.reply is not None:
@@ -342,3 +349,131 @@ def test_minimax_candidate_in_a_cross_vendor_p6_run(env: Env) -> None:
     row = rows["minimax-m3.1-flash@1"]
     assert row["own_vendor"] == "minimax" and row["own_first.k"] == "2"
     assert float(row["own_first_delta"]) == 1.0
+
+
+# ----- web search (server tool on the Anthropic-compatible Messages API) -------------------------------------------
+
+SEARCH_TOOL: dict[str, Any] = {"type": "web_search_20250305", "name": "web_search"}
+
+
+def searching_config(**pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def searched(*, searches: int = 2, stop: str = "end_turn", reported: int | None = None) -> dict[str, Any]:
+    """Shaped like the documented server-tools response: lead-in text, searches, thinking, then the answer."""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": "I'll search. "}]
+    for i in range(searches):
+        blocks += [
+            {"type": "server_tool_use", "id": f"call_function_x_{i}", "name": "web_search", "input": {"query": f"q{i}"}},
+            {"type": "web_search_tool_result", "tool_use_id": f"call_function_x_{i}",
+             "content": [{"type": "web_search_result", "title": "T", "url": "https://example.com",
+                          "page_age": "2026/11/20 07:08:47", "content": "result text"}]},
+        ]
+    blocks += [THINKING, {"type": "text", "text": "Answer."}]
+    usage = dict(USAGE)
+    if reported is not None:
+        usage["server_tool_use"] = {"web_search_requests": reported}
+    return message(stop=stop, usage=usage, base_resp={"status_code": 0, "status_msg": ""}) | {"content": blocks}
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    mock = MockMiniMax(reply=httpx2.Response(200, json=searched()))
+    outcome, files = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert json.loads(mock.requests[0].content)["tools"] == [SEARCH_TOOL] and len(mock.requests) == 1
+    assert outcome.succeeded and outcome.extracted.final_answer == "I'll search. Answer."  # text blocks only
+    assert "result text" not in outcome.extracted.final_answer and files["reasoning.txt"] == "pondering"
+    assert outcome.observations["web_search_requests"].value == 2
+    assert "server_tool_use web_search blocks" in outcome.observations["web_search_requests"].source
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST + 0.02)
+    outcome, _ = call(tmp_path, MockMiniMax(reply=httpx2.Response(200, json=searched(reported=3))),
+                      searching_config(web_search_usd_per_request=0.01))
+    assert outcome.observations["web_search_requests"].value == 3  # a reported usage count wins
+    outcome, _ = call(tmp_path, MockMiniMax(reply=httpx2.Response(200, json=searched())), searching_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, MockMiniMax(), searching_config())
+    assert outcome.observations["web_search_requests"].value == 0  # offered but unused: priced as no searches
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST)
+    plain = MockMiniMax()
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+
+
+def test_search_blocks_without_the_parameter_are_still_unexpected(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, MockMiniMax(reply=httpx2.Response(200, json=searched())))
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and "unexpected_content" in str(outcome.error)
+
+
+def test_paused_server_tool_loop_still_paused_after_the_resumes_is_an_incomplete_failure(tmp_path: Path) -> None:
+    mock = MockMiniMax(reply=httpx2.Response(200, json=searched(stop="pause_turn")))
+    outcome, files = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES and '"incomplete"' in str(outcome.error)
+    assert len(mock.requests) == 4 and len(json.loads(files["wire-exchanges.json"])) == 4  # 3 resumes by default
+    assert outcome.observations["web_search_requests"].value == 8
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(4 * (EXPECTED_COST + 0.02))
+
+
+def test_paused_turn_is_resumed_with_its_content_and_searches_are_summed(tmp_path: Path) -> None:
+    # Seen live 2026-11-25: MiniMax paused after 12 searches on a framework question.
+    paused, final = searched(searches=2, stop="pause_turn"), searched(searches=1)
+    mock = MockMiniMax(replies=[httpx2.Response(200, json=paused), httpx2.Response(200, json=final)])
+    outcome, files = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert outcome.succeeded and len(mock.requests) == 2
+    first, second = (json.loads(r.content) for r in mock.requests)
+    assert second["messages"][:-1] == first["messages"] and second["tools"] == first["tools"]
+    assert second["messages"][-1] == {"role": "assistant", "content": paused["content"]}  # no extra user turn
+    assert outcome.extracted.final_answer == "I'll search. Answer.I'll search. Answer."
+    assert outcome.observations["web_search_requests"].value == 3
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(2 * EXPECTED_COST + 0.03)
+    native = json.loads(files["native-response.json"])
+    assert native["content"] == paused["content"] + final["content"] and native["harness_pause_turns"] == [paused]
+
+
+def test_a_failed_resume_keeps_the_billed_paused_call(tmp_path: Path) -> None:
+    mock = MockMiniMax(replies=[httpx2.Response(200, json=searched(stop="pause_turn")),
+                                httpx2.Response(529, json={"type": "error", "error": {"type": "overloaded_error",
+                                                                                      "message": "busy"}})])
+    outcome, _ = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert not outcome.succeeded and outcome.cost_incurred is CostIncurred.YES
+    assert outcome.observations["web_search_requests"].value == 2
+
+
+@pytest.mark.parametrize("value", [
+    {"type": "custom", "name": "web_search"},
+    {"type": "web_search_20250305", "name": "search"},
+    {"type": "web_search"},  # the Responses API form
+])
+def test_web_search_value_must_be_the_server_search_tool(value: dict[str, Any]) -> None:
+    data = searching_config().model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = value
+    config = ModelConfiguration.model_validate(data)
+    with pytest.raises(AdapterError) as raised:
+        MockMiniMax().adapter().prepare(config, MESSAGES, None, ctx())
+    assert raised.value.kind is FailureKind.INVALID_STATE
+    mock = MockMiniMax()
+    checks = {c.name: c for c in mock.adapter().qualify(config, NO_BRANCHES).checks}
+    assert checks["parameter_support"].passed is False and mock.requests == []
+
+
+def test_continuation_replays_search_blocks_with_signed_thinking(tmp_path: Path) -> None:
+    replies = [searched(), message("Follow-up answer.")]
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json=replies.pop(0))
+
+    adapter = MiniMaxAdapter(api_key=API_KEY, transport_factory=lambda: httpx2.MockTransport(handler))
+    config = searching_config(web_search_usd_per_request=0.01)
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    sent = json.loads(requests[1].content)
+    assert sent["messages"][1] == {"role": "assistant", "content": searched()["content"]}  # exactly as returned
+    assert sent["messages"][2] == {"role": "user", "content": "Follow-up"} and sent["tools"] == [SEARCH_TOOL]

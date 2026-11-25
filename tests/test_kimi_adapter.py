@@ -194,6 +194,17 @@ def test_no_cache_writes_need_no_ttl_split() -> None:
     assert _observations(CONFIG, usage, {})["api_cost_usd"].value == pytest.approx((1000 * 2.0 + 500 * 10.0) / 1e6)
 
 
+
+def test_warm_turn_without_write_fields_or_headers_is_priced_as_no_writes() -> None:
+    # Observed 2026-11-25 (third round of a search loop): cached_tokens only, no cache-write headers.
+    usage = {"cached_tokens": 2688, "completion_tokens": 4235, "prompt_tokens": 9719, "total_tokens": 13954,
+             "completion_tokens_details": {"reasoning_tokens": 3608}, "prompt_tokens_details": {"cached_tokens": 2688}}
+    obs = _observations(CONFIG, usage, {"msh-context-cache-token-saved": "2688"})
+    assert obs["cache_write_tokens"].value == 0 and obs["uncached_input_tokens"].value == 9719 - 2688
+    assert obs["api_cost_usd"].value == pytest.approx(((9719 - 2688) * 2.0 + 2688 * 0.2 + 4235 * 10.0) / 1e6)
+    # A write header without the usage field is still an unexplained write: cost stays unknown.
+    assert _observations(CONFIG, usage, WRITE_HEADERS)["api_cost_usd"].value is None
+
 def error(status: int, kind: str, message: str = "nope") -> httpx2.Response:
     return httpx2.Response(status, json={"error": {"type": kind, "message": message}})
 
@@ -332,3 +343,177 @@ def test_kimi_candidate_in_a_cross_vendor_p6_run(env: Env) -> None:
     row = rows["kimi-k3.1-pro@1"]
     assert row["own_vendor"] == "moonshot" and row["own_first.k"] == "2"
     assert float(row["own_first_delta"]) == 1.0
+
+
+# ----- web search (Formula official web-search tool, client-side round trip) ------------------------------------
+
+SEARCH_TOOL: dict[str, Any] = {  # GET /v1/formulas/moonshot/web-search:latest/tools, as documented
+    "type": "function",
+    "function": {"name": "web_search", "description": "Search the web for information",
+                 "parameters": {"type": "object", "properties": {"query": {"description": "What to search for",
+                                                                           "type": "string"}},
+                                "required": ["query"]}},
+}
+FIBERS_PATH = "/v1/formulas/moonshot/web-search:latest/fibers"
+PER_CALL_COST = (344 * 2.0 + 400 * 0.2 + 256 * 2.0 + 500 * 10.0) / 1e6
+
+
+def searching_config(*, pricing: dict[str, Any] | None = None, **options: Any) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing or {})
+    data["adapter_options"].update(options)
+    return ModelConfiguration.model_validate(data)
+
+
+def tool_calls(round_number: int = 1, *, calls: int = 1, name: str = "web_search") -> dict[str, Any]:
+    body = completion("", finish="tool_calls", reasoning=f"search first ({round_number})")
+    body["id"] = f"chatcmpl-tools-{round_number}"
+    body["choices"][0]["message"]["tool_calls"] = [
+        {"id": f"web_search:{i}", "type": "function",
+         "function": {"name": name, "arguments": json.dumps({"query": f"q{round_number}.{i}",
+                                                            "usage": {"total_tokens": 900}})}}
+        for i in range(calls)]
+    return body
+
+
+def fiber_for(request: httpx2.Request) -> dict[str, Any]:
+    sent = json.loads(request.content)
+    return {"id": "fiber-1", "object": "fiber", "status": "succeeded", "formula": "moonshot/web-search:latest",
+            "context": {"input": json.dumps(sent),
+                        "encrypted_output": f"----MOONSHOT ENCRYPTED BEGIN----{sent['arguments']}----MOONSHOT "
+                                            "ENCRYPTED END----"}}
+
+
+class SearchingKimi(MockKimi):
+    """Chat replies follow a script, then answer like MockKimi; fibers succeed unless told otherwise."""
+
+    def __init__(self, script: list[dict[str, Any] | httpx2.Response],
+                 fiber: dict[str, Any] | httpx2.Response | None = None) -> None:
+        super().__init__(answer="Final answer.")
+        self.script, self.fiber = list(script), fiber
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        if request.url.path.startswith("/v1/formulas/"):
+            self.requests.append(request)
+            assert request.url.path == FIBERS_PATH, request.url
+            if isinstance(self.fiber, httpx2.Response):
+                return self.fiber
+            return httpx2.Response(200, json=self.fiber if self.fiber is not None else fiber_for(request))
+        if request.url.path == "/v1/chat/completions" and self.script:
+            self.requests.append(request)
+            reply = self.script.pop(0)
+            return reply if isinstance(reply, httpx2.Response) else httpx2.Response(200, json=reply,
+                                                                                     headers=WRITE_HEADERS)
+        return super().__call__(request)
+
+
+def test_web_search_loop_is_sent_verbatim_captured_summed_and_priced(tmp_path: Path) -> None:
+    mock = SearchingKimi([tool_calls(calls=2)])
+    outcome, files = call(tmp_path, mock, searching_config(pricing={"web_search_usd_per_request": 0.005}))
+    assert outcome.succeeded and outcome.extracted.final_answer == "Final answer."
+    paths = [r.url.path for r in mock.requests]
+    assert paths == ["/v1/chat/completions", FIBERS_PATH, FIBERS_PATH, "/v1/chat/completions"]
+    first, last = json.loads(mock.requests[0].content), json.loads(mock.requests[3].content)
+    assert first["tools"] == [SEARCH_TOOL] and last["tools"] == [SEARCH_TOOL]
+    assert {k: v for k, v in first.items() if k != "tools"} == {
+        "model": MODEL, "max_completion_tokens": 16000,
+        "messages": [{"role": "system", "content": "Be precise."}, {"role": "user", "content": "Pick a model."}]}
+    returned = tool_calls(calls=2)["choices"][0]["message"]
+    for i, request in enumerate(mock.requests[1:3]):  # the tool call's name and arguments, verbatim
+        assert json.loads(request.content) == {"name": "web_search",
+                                               "arguments": returned["tool_calls"][i]["function"]["arguments"]}
+    results = [fiber_for(r)["context"]["encrypted_output"] for r in mock.requests[1:3]]
+    assert last["messages"] == first["messages"] + [returned] + [
+        {"role": "tool", "tool_call_id": f"web_search:{i}", "content": results[i]} for i in range(2)]
+    assert len(json.loads(files["wire-exchanges.json"])) == 4
+    native = json.loads(files["native-response.json"])
+    (record,) = native["harness_web_search_rounds"]
+    assert record["chat_completion"]["id"] == "chatcmpl-tools-1" and len(record["fibers"]) == 2
+    assert native["choices"][0]["message"]["content"] == "Final answer."
+    assert files["reasoning.txt"] == "search first (1)\n\npondering"
+    obs = outcome.observations
+    assert obs["web_search_requests"].value == 2 and obs["web_search_requests"].unit == "requests"
+    assert (obs["input_tokens"].value, obs["output_tokens"].value, obs["cache_write_5m_tokens"].value) == (2000, 1000, 512)
+    assert obs["api_cost_usd"].value == pytest.approx(2 * PER_CALL_COST + 2 * 0.005)
+
+
+def test_web_search_without_a_rate_leaves_cost_unknown_and_unused_search_is_free(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, SearchingKimi([tool_calls()]), searching_config())
+    assert outcome.observations["web_search_requests"].value == 1
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    mock = SearchingKimi([])  # answers without calling the tool
+    outcome, _ = call(tmp_path, mock, searching_config())
+    assert len(mock.requests) == 1 and outcome.observations["web_search_requests"].value == 0
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(PER_CALL_COST)
+    plain = MockKimi()
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+
+
+def test_web_search_loop_beyond_the_bound_is_an_incomplete_failure(tmp_path: Path) -> None:
+    mock = SearchingKimi([tool_calls(1), tool_calls(2)])
+    outcome, files = call(tmp_path, mock, searching_config(web_search_max_rounds=1))
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES and '"incomplete"' in str(outcome.error)
+    assert [r.url.path for r in mock.requests] == ["/v1/chat/completions", FIBERS_PATH, "/v1/chat/completions"]
+    assert len(json.loads(files["wire-exchanges.json"])) == 3
+    assert outcome.observations["web_search_requests"].value == 1
+    assert outcome.observations["input_tokens"].value == 2000
+    assert len(json.loads(files["native-response.json"])["harness_web_search_rounds"]) == 1
+
+
+@pytest.mark.parametrize(("script", "fiber", "kind", "error_type", "priced"), [
+    ([tool_calls(name="other_tool")], None, FailureKind.PROVIDER_ERROR, "unexpected_tool_call", True),
+    ([tool_calls()], {"id": "fiber-1", "status": "failed", "context": {}}, FailureKind.PROVIDER_ERROR,
+     "tool_error", True),
+    ([tool_calls()], error(500, "server_error"), FailureKind.TRANSIENT_TRANSPORT, "tool_http_500", True),
+    ([tool_calls(), httpx2.Response(504, text="gateway timeout")], None, FailureKind.AMBIGUOUS_TIMEOUT,
+     "http_504", False),
+])
+def test_web_search_loop_failures_are_recorded_with_the_billed_rounds(
+        tmp_path: Path, script: list[Any], fiber: Any, kind: FailureKind, error_type: str, priced: bool) -> None:
+    outcome, files = call(tmp_path, SearchingKimi(script, fiber),
+                          searching_config(pricing={"web_search_usd_per_request": 0.005}))
+    assert outcome.failure_kind is kind and outcome.cost_incurred is CostIncurred.YES
+    assert f'"type": "{error_type}"' in str(outcome.error) and "error.json" in files
+    assert (outcome.observations["api_cost_usd"].value is not None) is priced
+
+
+@pytest.mark.parametrize(("value", "options"), [
+    ({"type": "builtin_function", "function": {"name": "$web_search"}}, {}),  # retired 2026-10-20
+    ({"type": "web_search"}, {}),
+    ({"type": "function", "function": {"name": "web_search"}}, {}),
+    (SEARCH_TOOL, {"web_search_formula": "moonshot/date:latest"}),
+    (SEARCH_TOOL, {"web_search_max_rounds": 0}),
+])
+def test_web_search_value_must_be_the_formula_tool_declaration(value: dict[str, Any], options: dict[str, Any]) -> None:
+    data = searching_config(**options).model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = value
+    with pytest.raises(AdapterError) as raised:
+        MockKimi().adapter().prepare(ModelConfiguration.model_validate(data), MESSAGES, None, ctx())
+    assert raised.value.kind is FailureKind.INVALID_STATE
+
+
+def test_continuation_after_a_search_replays_the_tool_rounds(tmp_path: Path) -> None:
+    config = searching_config()
+    mock = SearchingKimi([tool_calls()])
+    adapter = mock.adapter()
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None
+    final_sent = json.loads(mock.requests[2].content)["messages"]
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    sent = json.loads(mock.requests[3].content)
+    final = completion("Final answer.")["choices"][0]["message"]
+    assert sent["messages"] == final_sent + [final, {"role": "user", "content": "Follow-up"}]
+    assert sent["messages"][3]["role"] == "tool" and sent["tools"] == [SEARCH_TOOL]
+
+
+def test_qualification_with_web_search_accepts_a_searching_baseline() -> None:
+    mock = SearchingKimi([tool_calls()])
+    report = mock.adapter().qualify(searching_config(), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    assert report.probes[0]["cost_usd"] is None  # a search without a configured rate is never priced as free

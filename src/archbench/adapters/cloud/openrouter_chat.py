@@ -2,9 +2,18 @@
 (`POST https://openrouter.ai/api/v1/chat/completions`, `Authorization: Bearer`).
 
 This adapter exists for vendors whose first-party API is unavailable to us (Qwen: the Alibaba Model Studio
-account is closed). It reaches the SAME vendor's servers through OpenRouter and nothing else: `provider` in the
-configuration names the vendor (so the bias report attributes results to it), and only the routes in `ROUTES`
-are allowed, each the vendor's own OpenRouter provider. Every request carries
+account is closed; Gemini: the direct Google key's quota is too small). It reaches the SAME vendor's servers through
+OpenRouter and nothing else: `provider` in the configuration names the vendor (so the bias report attributes results
+to it), and only the routes in `ROUTES` are allowed, each the vendor's own OpenRouter provider:
+    alibaba -> `alibaba` ("Alibaba")
+    google  -> `google-ai-studio` ("Google AI Studio"): the Gemini Developer API the direct gemini adapter calls.
+               Never Vertex (`google-vertex`, reported as "Google"). AI Studio also lists flex and priority tier
+               endpoints; a base slug never routes to a closed-weight model's tier endpoints (provider-selection and
+               service-tiers docs, read 2026-11-25), so qualification ignores them, a tier-suffixed provider_endpoint
+               is rejected, and a response reporting any `service_tier` other than "default" is a failure.
+`VENDORS` holds what differs per vendor: the efforts that map onto the vendor's native control, whether web search
+can run on the vendor's own engine, and the shape of the body OpenRouter forwards (see UPSTREAM CHECK). Every
+request carries
 `provider: {only: [<vendor slug>], allow_fallbacks: false, require_parameters: true}`: no other provider, no
 fallback, and no routing at all if a sent parameter is not supported. Model-level fallbacks (`models`, `route`)
 and model variants (`:nitro`, `:floor`, ...) are never used.
@@ -19,8 +28,9 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
   when `reasoning` is omitted is undocumented, so a native default can only be reproduced by sending it.
 - Reasoning arrives as `message.reasoning` and `message.reasoning_details`. Continuation replays the assistant
   message exactly as returned. Whether that reaches the vendor is not documented: qualification checks it.
-- UPSTREAM CHECK: OpenRouter translates the request into the vendor's format. Qualification sends one streamed
-  follow-up with `debug.echo_upstream_body` (streaming only, best-effort redacted) and checks the body OpenRouter
+- UPSTREAM CHECK (Alibaba rules below; Google next): OpenRouter translates the request into the vendor's format.
+  Qualification sends one streamed follow-up with `debug.echo_upstream_body` (streaming only, best-effort
+  redacted) and checks the body OpenRouter
   forwarded: the vendor model id must be `adapter_options.upstream_model`; parameters the configuration omits must
   not be injected; an output cap (`max_tokens` or `max_completion_tokens`) must be present and unchanged; the
   replayed answer and reasoning must be forwarded with the baseline's exact text; `enable_search` must not be
@@ -34,19 +44,65 @@ Plain HTTP against the documented REST API: the recorded request is exactly the 
   A value the echo hides (e.g. "<included to upstream but not in debug info>") stays unverified whatever is
   pinned, and pinning the placeholder itself fails; only a hidden enable_thinking is checked, by behaviour.
   The echo is recorded in the probes.
-- Cancellation is not supported for Alibaba: an abandoned request runs, and is billed, to completion.
+- UPSTREAM CHECK, Google: OpenRouter forwards a Gemini generateContent body (a body without `contents` leaves the
+  check NOT EVALUATED). Checked: the Gemini model id (`model`, "models/" prefix ignored) is upstream_model, and an
+  echo without one stays unverified; generationConfig.maxOutputTokens is present and unchanged; no sampling value
+  (temperature, topP, topK, presencePenalty, frequencyPenalty, seed) the configuration omits is forwarded;
+  generationConfig.thinkingConfig.thinkingLevel is the configured effort (OpenRouter maps reasoning.effort onto
+  thinkingLevel one to one: reasoning-tokens docs), and with the effort omitted it is absent or its documented
+  default; the replayed model turn carries the baseline answer and every thought signature the baseline returned
+  (`reasoning.encrypted` details, except OpenRouter's `gemini-continuation` token, which it drops from earlier
+  turns), with any forwarded thought text equal to the baseline's; and `tools` is exactly one Google Search
+  grounding tool (googleSearch / google_search) when web_search is configured and has none otherwise. Any other
+  forwarded value (e.g. thinkingConfig.includeThoughts, thinkingBudget, safetySettings) leaves the check NOT
+  EVALUATED until pinned in upstream_expect, whose keys are dotted camelCase paths here (e.g.
+  `generationConfig.thinkingConfig.includeThoughts`; Gemini accepts snake_case too, so the echo's keys are
+  normalised to camelCase before checking). If OpenRouter sends no echo for Google, the check stays NOT
+  EVALUATED, so qualification cannot pass on behaviour alone; the per-call checks below still run.
+- Cancellation is not supported for Alibaba: an abandoned request runs, and is billed, to completion. Google
+  requests are treated the same way (a timeout is an ambiguous, possibly billed failure).
 - Refusals: OpenRouter moderation (HTTP 403 with flagged metadata), a vendor content block (Alibaba's
   `data_inspection_failed`), or finish_reason `content_filter`.
+- Google reasoning: Gemini may return reasoning only as thought signatures (`reasoning.encrypted` details, format
+  google-gemini-v1) without readable text. A signature is replayable reasoning, so a response with reasoning
+  tokens and signatures but no text is complete; with neither it is a failure as for Alibaba.
 
-Cost uses configured prices, which qualification compares with the endpoint's live OpenRouter pricing.
+WEB SEARCH (Google only): `web_search` is OpenRouter's `openrouter:web_search` server tool, sent verbatim in
+`tools` (the `plugins: [{id: web}]` plugin and `:online` are deprecated and never used). It must pin
+`parameters: {engine: native}` and nothing else: `auto` (the default) falls back to Exa, other engines are not
+Google, and Google's native tool takes no domain filters (OpenRouter answers 400 with engine native). Because even
+`native` falls back to another engine when the endpoint lacks native search, Google-ness is proven three ways:
+qualification requires the pinned endpoint's `native_tools["openrouter:web_search"].type` to be google_search and
+the forwarded body to carry the googleSearch tool; and every response with `usage.server_tool_use_details.
+tool_calls_requested` > 0 (searches OpenRouter orchestrated itself; native searches are not counted there) or a
+routing-metadata `server_tools` pipeline stage whose mode is not "native" is a failure (an absent mode is not
+evidence either way). `web_search_requests` is `usage.server_tool_use_details.web_search_requests` ("search
+queries the model made", server-tools docs); with no count it is 0 unless the message carries citations, in which
+case the count and the cost are missing. Google bills Gemini 3+ grounding per search query ($14 / 1,000, the
+OpenRouter endpoint's `pricing.web_search` 0.014); whether OpenRouter's count is Google's billed query count
+(unique, non-empty queries) is not documented, so compare `openrouter_charge` (usage.cost, which includes server
+tool charges) with api_cost_usd in the pilot. A search response that ends on a tool call, with finish_reason
+`tool_calls`, a native finish of TOO_MANY_TOOL_CALLS / MALFORMED_FUNCTION_CALL / UNEXPECTED_TOOL_CALL, or `stop`
+without answer text is an incomplete failure, never a partial answer. The final answer is the message text only;
+`annotations` (url_citation) stay in the native response. Continuation replays the assistant message exactly as
+returned, annotations included: OpenRouter's request schema has no assistant `annotations` field, and whether it
+ignores or forwards them is shown by the upstream check (the forwarded model turn must hold the baseline answer
+text only); for that reason the search configuration's upstream baseline asks the model to search.
+
+Cost uses configured prices, which qualification compares with the endpoint's live OpenRouter pricing (and, when
+listed, requires `internal_reasoning` to equal the output price, since reasoning is costed as output).
 `usage.prompt_tokens` is the total input: cache reads (`prompt_tokens_details.cached_tokens`), cache writes
 (`prompt_tokens_details.cache_write_tokens`, reported only for explicit caching, which this adapter never
 requests) and uncached input sum to it. OpenRouter's own charge (`usage.cost`, in credits) is recorded beside it.
+Searches are priced with `web_search_usd_per_request`; searches without that rate leave the cost missing.
 
 Configuration parameters (all others are rejected at qualification):
     max_output_tokens  explicit, required   -> max_tokens (includes reasoning tokens)
-    reasoning_effort   explicit or omitted  -> reasoning.effort
+    reasoning_effort   explicit or omitted  -> reasoning.effort (Google: minimal, low, medium, high, xhigh, the
+                                               Gemini thinking levels; none and max are rejected)
     temperature, top_p, top_k, presence_penalty   explicit or omitted -> same names
+    web_search         explicit or omitted  -> tools: [value] (Google only; {type: openrouter:web_search,
+                                               parameters: {engine: native}})
 adapter_options:
     provider_endpoint: optional vendor endpoint slug with suffix, e.g. alibaba/us-east-1; must belong to vendor
     endpoint_model: OpenRouter's endpoint label, e.g. qwen4-max-20261115 (required; listing name, routing metadata)
@@ -55,7 +111,7 @@ adapter_options:
     upstream_expect: {key: value} that must appear in the forwarded body (optional)
     timeout_s: 900 (default)
     pricing: {input_usd_per_mtok, cached_input_usd_per_mtok, cache_write_usd_per_mtok, output_usd_per_mtok,
-              source, verified_on}
+              web_search_usd_per_request?, source, verified_on}
 """
 
 from __future__ import annotations
@@ -95,7 +151,41 @@ class Route:
 
 
 # configuration `provider` (the vendor) -> the vendor's own OpenRouter provider. Never a third-party host.
-ROUTES = {"alibaba": Route(slug="alibaba", name="Alibaba")}
+# Google AI Studio is the Gemini Developer API (generativelanguage.googleapis.com), the service the direct gemini
+# adapter calls; Vertex AI ("Google", google-vertex/*) is excluded. Slugs and names from
+# /api/v1/models/google/<model>/endpoints, read 2026-11-25.
+ROUTES = {"alibaba": Route(slug="alibaba", name="Alibaba"),
+          "google": Route(slug="google-ai-studio", name="Google AI Studio")}
+
+OPENAI_CHAT_BODY = "openai-chat"  # the vendor receives an OpenAI-style chat body (Alibaba)
+GEMINI_BODY = "gemini-generate-content"  # the vendor receives a Gemini generateContent body (Google)
+
+
+@dataclass(frozen=True)
+class Vendor:
+    """What differs per vendor behind its OpenRouter route."""
+    upstream_body: str  # shape of the body OpenRouter forwards, which decides how the upstream check reads it
+    efforts: frozenset[str]  # reasoning_effort values that map onto the vendor's native control
+    native_search: frozenset[str]  # native_tools types that prove web search runs on the vendor's engine
+    tier_endpoints_opt_in: bool  # tier endpoints (flex, priority) never serve a base-slug request
+    signed_reasoning: bool  # reasoning may come back only as signatures, which are replayable reasoning
+    reported: tuple[str, ...]  # forwarded keys shown in the upstream check's detail
+
+
+SAMPLING = ("temperature", "top_p", "top_k", "presence_penalty")
+REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+UPSTREAM_REPORTED = ("model", "max_tokens", "max_completion_tokens", "enable_thinking", "reasoning_effort",
+                     "thinking_budget", "preserve_thinking", "enable_search", *SAMPLING, "stream")
+VENDORS = {
+    "alibaba": Vendor(upstream_body=OPENAI_CHAT_BODY, efforts=REASONING_EFFORTS, native_search=frozenset(),
+                      tier_endpoints_opt_in=False, signed_reasoning=False, reported=UPSTREAM_REPORTED),
+    # Gemini thinking levels (aistudio.google.com/docs/thinking, read 2026-11-25); reasoning is mandatory, so
+    # "none" is not offered. native_tools type as listed on every Gemini endpoint (read 2026-11-25).
+    "google": Vendor(upstream_body=GEMINI_BODY, efforts=frozenset({"minimal", "low", "medium", "high", "xhigh"}),
+                     native_search=frozenset({"google_search", "googleSearch"}), tier_endpoints_opt_in=True,
+                     signed_reasoning=True,
+                     reported=("model", "generationConfig", "tools", "toolConfig", "safetySettings")),
+}
 
 STATE_FORMAT = "openrouter-chat-v1"
 BASE_URL = "https://openrouter.ai/api/v1/"
@@ -103,17 +193,29 @@ CHAT_PATH = "chat/completions"
 DEFAULT_TIMEOUT_S = 900
 PROBE_MAX_TOKENS = 2048
 METADATA_HEADER = {"x-openrouter-metadata": "enabled"}
-SAMPLING = ("temperature", "top_p", "top_k", "presence_penalty")
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "reasoning_effort", *SAMPLING})
-REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "reasoning_effort", *SAMPLING, "web_search"})
+WEB_SEARCH_TOOL = "openrouter:web_search"
+TIER_SEGMENTS = frozenset({"flex", "priority", "fast", "turbo", "highspeed", "prime", "ultrafast"})
+STANDARD_TIERS = (None, "default", "standard")
+# Native finish reasons meaning the server-side tool loop stopped before an answer (Gemini FinishReason).
+INCOMPLETE_NATIVE_FINISH = frozenset({"TOO_MANY_TOOL_CALLS", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"})
+GEMINI_SAMPLING = {"temperature": "temperature", "top_p": "topP", "top_k": "topK",
+                   "presence_penalty": "presencePenalty"}
+GEMINI_UNCONFIGURABLE_SAMPLING = ("frequencyPenalty", "seed", "candidateCount")  # never configured: never forwarded
+# ...except at Google's own default: OpenRouter always forwards candidateCount 1 (seen 2026-11-25), which is the
+# generateContent default (https://ai.google.dev/api/generate-content#generationconfig), so it changes nothing.
+GEMINI_DEFAULT_SAMPLING = {"candidateCount": 1}
+GEMINI_EXPANDED = ("generationConfig", "generationConfig.thinkingConfig")  # dicts checked key by key
+GEMINI_SEARCH_KEYS = frozenset({"googleSearch", "google_search"})
+GEMINI_CONTINUATION_ID = "gemini-continuation"  # long-decode token; OpenRouter drops it from earlier turns
+BASELINE_PROMPT = "Reply with exactly one word: baseline"
+SEARCH_BASELINE_PROMPT = ("Search the web for today's date, then reply with exactly one word: baseline")
 OUTPUT_LIMIT_KEYS = ("max_tokens", "max_completion_tokens")  # vendor-side names for the output cap
 # Vendor-side reasoning controls (Alibaba: enable_thinking, reasoning_effort, thinking_budget, preserve_thinking).
 THINKING_KEYS = ("enable_thinking", "reasoning_effort", "thinking_budget", "preserve_thinking")
 # Forwarded keys that need no verification: the request itself and streaming plumbing (the probe streams).
 NEUTRAL_KEYS = frozenset({"model", "messages", "stream", "stream_options"})
 REASONING_KEYS = ("reasoning_content", "reasoning", "thinking")  # where a vendor body may carry earlier reasoning
-UPSTREAM_REPORTED = ("model", "max_tokens", "max_completion_tokens", "enable_thinking", "reasoning_effort",
-                     "thinking_budget", "preserve_thinking", "enable_search", *SAMPLING, "stream")
 # OpenRouter replaces some forwarded values in the debug echo, e.g. "<included to upstream but not in debug info>"
 # for enable_thinking (observed 2026-11-20).
 HIDDEN_VALUE = re.compile(r"(?i)^<.*(not in debug info|redacted).*>$")
@@ -214,6 +316,10 @@ class OpenRouterAdapter:
         ours = [e for e in endpoints if str(e.get("tag") or "").split("/")[0] == route.slug]
         if selected_slug != route.slug:
             ours = [e for e in ours if e.get("tag") == selected_slug]
+        elif _vendor(config).tier_endpoints_opt_in:
+            # A base slug never routes to a closed-weight model's tier endpoints (flex, priority): they are not
+            # candidates, and the standard endpoint is the one that must be unique.
+            ours = [e for e in ours if e.get("service_tier") in STANDARD_TIERS]
         problems: list[str] = []
         if data.get("id") != config.model:
             problems.append(f"endpoints list is for {data.get('id')!r}, not {config.model!r}")
@@ -242,6 +348,15 @@ class OpenRouterAdapter:
         detail = (f"{endpoint.get('name')} ({endpoint.get('provider_name')}, quantization "
                   f"{endpoint.get('quantization')}, status {endpoint.get('status')}): context_length={context}, "
                   f"max_completion_tokens={output_cap}; prices match configuration")
+        if _searching(config):
+            # With engine "native" OpenRouter still falls back to another engine on an endpoint without native
+            # search: the endpoint itself must run openrouter:web_search as the vendor's own tool.
+            native = (endpoint.get("native_tools") or {}).get(WEB_SEARCH_TOOL)
+            native_type = native.get("type") if isinstance(native, dict) else None
+            if native_type not in _vendor(config).native_search:
+                problems.append(f"endpoint runs {WEB_SEARCH_TOOL} as {native!r}, not the vendor's own search "
+                                f"({sorted(_vendor(config).native_search)}): searches would use another engine")
+            detail += f"; {WEB_SEARCH_TOOL} runs natively as {native_type}"
         return (QualificationCheck(name="model_identity", passed=not problems, detail="; ".join(problems) or detail),
                 context if isinstance(context, int) else None)
 
@@ -273,9 +388,12 @@ class OpenRouterAdapter:
 
     def _upstream_check(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
         """A baseline, then one streamed follow-up (configured max_output_tokens, replayed assistant message) with
-        `debug.echo_upstream_body`: the body OpenRouter forwarded to the vendor must match the configuration."""
+        `debug.echo_upstream_body`: the body OpenRouter forwarded to the vendor must match the configuration.
+        With web search configured the baseline asks for a search, so the replay of a message carrying search
+        artefacts is what the echo shows (the model may still not search; the detail says so)."""
+        searching = _searching(config)
         base_messages = (Message(role=Role.SYSTEM, content="You are answering a harness qualification probe."),
-                         Message(role=Role.USER, content="Reply with exactly one word: baseline"))
+                         Message(role=Role.USER, content=SEARCH_BASELINE_PROMPT if searching else BASELINE_PROMPT))
         try:
             prepared, execution = self._run_probe(self._probe_config(config), probes, "upstream-baseline",
                                                   base_messages, None)
@@ -322,8 +440,26 @@ class OpenRouterAdapter:
                                       detail="not evaluated: the stream carried no debug.echo_upstream_body chunk")
         record.update(upstream_provider=(debug or {}).get("provider"), upstream_body=echo)
         returned = _choice(execution.native_response or {}).get("message") or {}
-        problems, unverified, notes = _upstream_problems(config, echo, (debug or {}).get("provider"), returned)
-        reported = {k: echo[k] for k in UPSTREAM_REPORTED if k in echo}
+        vendor = _vendor(config)
+        unverified: dict[str, Any]
+        if vendor.upstream_body == GEMINI_BODY:
+            # Gemini's REST API accepts snake_case and camelCase field names alike: check one spelling. The probe
+            # records the echo as received.
+            echo = _camel_keys(echo)
+            if not isinstance(echo.get("contents"), list):
+                return QualificationCheck(name="upstream_request", passed=None,
+                                          detail=f"not evaluated: the forwarded body is not a Gemini generateContent "
+                                                 f"body (top-level keys {sorted(echo)})")
+            system = "\n\n".join(m.content for m in base_messages if m.role is Role.SYSTEM)
+            problems, unverified, notes = _gemini_upstream_problems(config, echo, (debug or {}).get("provider"),
+                                                                    returned, system)
+            if searching:
+                notes.append(_search_replay_note(execution, returned))
+        else:
+            problems, unverified_keys, notes = _upstream_problems(config, echo, (debug or {}).get("provider"),
+                                                                  returned)
+            unverified = {k: echo[k] for k in unverified_keys}
+        reported = {k: echo[k] for k in vendor.reported if k in echo}
         detail = (f"forwarded to {(debug or {}).get('provider')}: {json.dumps(reported, sort_keys=True)}; "
                   f"top-level keys {sorted(echo)}")
         if problems:
@@ -332,7 +468,7 @@ class OpenRouterAdapter:
         if unverified:
             # Not a contradiction, but not shown to match the configuration either: qualification stays incomplete
             # until the values are checked against the vendor's docs and pinned in adapter_options.upstream_expect.
-            pins = json.dumps({k: echo[k] for k in unverified}, sort_keys=True)
+            pins = json.dumps(unverified, sort_keys=True)
             return QualificationCheck(name="upstream_request", passed=None,
                                       detail=f"not verified: OpenRouter forwarded {pins}, which the configuration "
                                              f"does not determine or the echo hides; pin them in upstream_expect "
@@ -419,6 +555,10 @@ class OpenRouterAdapter:
                 body[name] = value
         if (effort := explicit(config, "reasoning_effort")) is not None:
             body["reasoning"] = {"effort": effort}
+        if (web_search := explicit(config, "web_search")) is not None:
+            if (problem := _web_search_problem(config, web_search)) is not None:
+                raise AdapterError(FailureKind.INVALID_STATE, problem)
+            body["tools"] = [copy.deepcopy(web_search)]
         body["provider"] = {"only": [_route_slug(config, route)], "allow_fallbacks": False,
                             "require_parameters": True}
         return PreparedInvocation(
@@ -474,10 +614,12 @@ class OpenRouterAdapter:
             return failed(FailureKind.PROVIDER_ERROR, "invalid_body", response.text[:500], CostIncurred.UNKNOWN,
                           request_id=request_id)
         request_id = data.get("id") or request_id
-        observations = _observations(config, data.get("usage") or {})
         choice = _choice(data)
         reason = choice.get("finish_reason")
         message = choice.get("message") or {}
+        observations = _observations(config, data.get("usage") or {}, message)
+        vendor = _vendor(config)
+        searching = _searching(config)
 
         def failure(kind: FailureKind, error: dict[str, Any], cost: CostIncurred = CostIncurred.YES
                     ) -> NativeExecution:
@@ -508,17 +650,33 @@ class OpenRouterAdapter:
         if endpoint != expected_endpoint:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "endpoint_mismatch", "expected": expected_endpoint,
                                                         "served": endpoint})
+        # Same label, same provider name: only the reported tier tells a flex or priority endpoint apart.
+        if vendor.tier_endpoints_opt_in and data.get("service_tier") not in STANDARD_TIERS:
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "tier_mismatch", "expected": "default",
+                                                        "served": data.get("service_tier")})
+        if searching and (engine := _search_engine_problem(data)) is not None:
+            return failure(FailureKind.PROVIDER_ERROR, engine)
         if not choice:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "no_choices"})
         if reason == "content_filter" or message.get("refusal"):
             return failure(FailureKind.REFUSAL, {"type": "content_filter", "refusal": message.get("refusal"),
                                                  "native_finish_reason": choice.get("native_finish_reason")})
-        if reason not in ("stop", "length"):  # tool_calls (no tools are sent), ...
+        native_reason = choice.get("native_finish_reason")
+        if searching and (message.get("tool_calls") or reason == "tool_calls"
+                          or native_reason in INCOMPLETE_NATIVE_FINISH
+                          or (reason == "stop" and not _content_text(message).strip())):
+            # The server-side search loop stopped before a final answer: never a partial answer.
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                        "native_finish_reason": native_reason,
+                                                        "detail": "server tool loop stopped before a final answer"})
+        if reason not in ("stop", "length"):  # tool_calls (no client tools are sent), ...
             return failure(FailureKind.PROVIDER_ERROR, {"type": "finish_reason", "reason": reason,
                                                         "native_finish_reason": choice.get("native_finish_reason")})
         # Without reasoning in the message a follow-up would silently drop it from the model's context. A missing
         # reasoning text is acceptable only when the response reports zero reasoning tokens; unreported is not zero.
-        if observations["reasoning_tokens"].value != 0 and not _reasoning_text(message):
+        # Gemini thought signatures are replayable reasoning even without readable text.
+        if observations["reasoning_tokens"].value != 0 and not _reasoning_text(message) and not (
+                vendor.signed_reasoning and _signatures(message)):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "missing_reasoning",
                                                         "reasoning_tokens": observations["reasoning_tokens"].value})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason,
@@ -531,7 +689,7 @@ class OpenRouterAdapter:
         choice = _choice(data)
         message = choice.get("message") or {}
         return ExtractedResponse(
-            final_answer=str(message.get("content") or ""),
+            final_answer=_content_text(message),  # text only: annotations stay in the native response
             truncated=choice.get("finish_reason") == "length",
             finish_reason=choice.get("finish_reason"),
             reasoning_text=_reasoning_text(message),
@@ -551,19 +709,51 @@ class OpenRouterAdapter:
                 "model": data.get("model"),
                 "response_id": data.get("id"),
                 "served_by": _served_provider(data),
-                # The assistant message (content, reasoning, reasoning_details) is replayed exactly as returned.
+                # The assistant message (content, reasoning, reasoning_details, and search annotations) is replayed
+                # exactly as returned; the upstream check shows what of it reaches the vendor.
                 "messages": copy.deepcopy(body["messages"]) + [copy.deepcopy(_choice(data).get("message") or {})],
             },
         )
 
 
+def _vendor(config: ModelConfiguration) -> Vendor:
+    """The vendor's profile; an unknown provider gets Alibaba's rules (it fails adapter_identity anyway)."""
+    return VENDORS.get(config.provider, VENDORS["alibaba"])
+
+
+def _searching(config: ModelConfiguration) -> bool:
+    return explicit(config, "web_search") is not None
+
+
+def _web_search_problem(config: ModelConfiguration, value: Any) -> str | None:
+    """web_search must be OpenRouter's server tool pinned to the vendor's own engine, with nothing else set:
+    `auto` (the default) and every named engine but `native` can run a search that is not the vendor's, and the
+    other parameters either do not apply to native search or make OpenRouter leave it (domain filters)."""
+    vendor = _vendor(config)
+    if not vendor.native_search:
+        return f"web_search: no native web search is allowed on the {config.provider!r} route"
+    if (not isinstance(value, dict) or value.get("type") != WEB_SEARCH_TOOL or set(value) - {"type", "parameters"}
+            or not isinstance(value.get("parameters"), dict)):
+        return (f"web_search must be the {WEB_SEARCH_TOOL} server tool definition, e.g. "
+                f"{{type: {WEB_SEARCH_TOOL}, parameters: {{engine: native}}}}")
+    parameters = value["parameters"]
+    if parameters.get("engine") != "native":
+        return (f"web_search must pin parameters.engine: native, not {parameters.get('engine')!r}: auto and the "
+                f"other engines (exa, firecrawl, parallel, perplexity) can search with a non-vendor engine")
+    if extra := sorted(set(parameters) - {"engine"}):
+        return f"web_search parameters {extra} are not part of the vendor's native search tool"
+    return None
+
+
 def _wire_parameters(config: ModelConfiguration) -> list[str]:
     names = ["max_tokens"] + [n for n in SAMPLING if explicit(config, n) is not None]
-    return names + (["reasoning"] if explicit(config, "reasoning_effort") is not None else [])
+    names += ["reasoning"] if explicit(config, "reasoning_effort") is not None else []
+    return names + (["tools"] if _searching(config) else [])
 
 
 def _route_slug(config: ModelConfiguration, route: Route) -> str:
-    """A suffixed slug targets one vendor endpoint; a bare slug matches every vendor endpoint."""
+    """A suffixed slug targets one vendor endpoint; a bare slug matches every vendor endpoint (for a vendor whose
+    tier endpoints are opt-in, every standard-tier endpoint, and a tier-suffixed slug is refused)."""
     endpoint = config.adapter_options.get("provider_endpoint")
     if endpoint is None:
         return route.slug
@@ -571,6 +761,9 @@ def _route_slug(config: ModelConfiguration, route: Route) -> str:
             or re.fullmatch(r"[a-z0-9-]+(?:/[a-z0-9-]+)+", endpoint) is None):
         raise AdapterError(FailureKind.INVALID_STATE,
                            f"provider_endpoint must be a suffixed endpoint of {route.slug!r}")
+    if _vendor(config).tier_endpoints_opt_in and endpoint.rsplit("/", 1)[-1] in TIER_SEGMENTS:
+        raise AdapterError(FailureKind.INVALID_STATE,
+                           f"provider_endpoint must be a standard-tier endpoint of {route.slug!r}, not {endpoint!r}")
     return endpoint
 
 
@@ -582,8 +775,11 @@ def _parameter_check(config: ModelConfiguration) -> QualificationCheck:
     if "max_output_tokens" not in explicit_names:
         problems.append("max_output_tokens must be explicit")
     effort = explicit(config, "reasoning_effort")
-    if effort is not None and effort not in REASONING_EFFORTS:
-        problems.append(f"reasoning_effort {effort!r} is not one of {sorted(REASONING_EFFORTS)}")
+    efforts = _vendor(config).efforts
+    if effort is not None and effort not in efforts:
+        problems.append(f"reasoning_effort {effort!r} is not one of {sorted(efforts)}")
+    if _searching(config) and (problem := _web_search_problem(config, explicit(config, "web_search"))):
+        problems.append(problem)
     return QualificationCheck(name="parameter_support", passed=not problems, detail="; ".join(problems) or "ok")
 
 
@@ -605,7 +801,26 @@ def _pricing_problems(config: ModelConfiguration, live: dict[str, Any]) -> list[
             continue
         if published is None or not isinstance(configured, int | float) or abs(published - configured) > 1e-6:
             problems.append(f"{key}: configured {configured}, OpenRouter {published}")
+    # Reasoning tokens are costed at the output price: an endpoint pricing them differently would be miscosted.
+    reasoning, completion = _float(live.get("internal_reasoning")), _float(live.get("completion"))
+    if live.get("internal_reasoning") is not None and (reasoning is None or reasoning != completion):
+        problems.append(f"OpenRouter prices internal_reasoning at {live.get('internal_reasoning')} per token, "
+                        f"completion at {live.get('completion')}; reasoning is costed as output")
+    # A search price is per request (USD), not per token. Checked whenever searches can happen or one is set.
+    if _searching(config) or "web_search_usd_per_request" in pricing:
+        published_search, configured_search = _float(live.get("web_search")), pricing.get("web_search_usd_per_request")
+        if (published_search is None or not isinstance(configured_search, int | float)
+                or abs(published_search - configured_search) > 1e-9):
+            problems.append(f"web_search_usd_per_request: configured {configured_search}, "
+                            f"OpenRouter {published_search}")
     return problems
+
+
+def _float(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any, returned: dict[str, Any]
@@ -706,6 +921,237 @@ def _thinking_check(config: ModelConfiguration, echo: dict[str, Any], expect: di
     return explained, problems, notes
 
 
+def _gemini_upstream_problems(config: ModelConfiguration, echo: dict[str, Any], provider: Any,
+                              returned: dict[str, Any], system: str
+                              ) -> tuple[list[str], dict[str, Any], list[str]]:
+    """The Google counterpart of _upstream_problems, for a forwarded generateContent body: contradictions, the
+    forwarded values nothing accounts for (dotted paths -> values), and notes. Pins in upstream_expect are dotted
+    paths into the body, e.g. generationConfig.thinkingConfig.includeThoughts."""
+    route = ROUTES[config.provider]
+    problems: list[str] = []
+    notes: list[str] = []
+    unverified: dict[str, Any] = {}
+    # `labels` carries only OpenRouter's per-account safety_identifier (abuse-monitoring metadata, seen 2026-11-25);
+    # it does not affect generation.
+    explained: set[str] = {"contents", "systemInstruction", "labels"}
+    if provider is not None and str(provider) != route.name:
+        problems.append(f"forwarded to {provider!r}, not {route.name!r}")
+    expected_model = config.adapter_options.get("upstream_model")
+    model = echo.get("model")
+    if model is None:
+        # generateContent names the model in the URL, which the echo does not show (seen 2026-11-25). The model is
+        # proven instead by the routing metadata every call must carry: Google AI Studio and the configured dated
+        # endpoint label (checked in model_identity and on every response).
+        notes.append("model id not in the forwarded body (Gemini puts it in the URL); identified by the pinned "
+                     f"endpoint {config.adapter_options.get('endpoint_model')!r}")
+    else:
+        explained.add("model")
+        if str(model).removeprefix("models/") != expected_model:
+            problems.append(f"vendor model {model!r}, not upstream_model {expected_model!r}")
+    forwarded_system = _gemini_text(_dict(echo.get("systemInstruction")).get("parts"))
+    if (forwarded_system or "").strip() != system.strip():
+        problems.append(f"system instruction forwarded as {_preview(forwarded_system)}, sent {_preview(system)}")
+    generation = _dict(echo.get("generationConfig"))
+    budget = explicit(config, "max_output_tokens")
+    explained.add("generationConfig.maxOutputTokens")
+    if "maxOutputTokens" not in generation:
+        problems.append(f"no output cap forwarded (generationConfig.maxOutputTokens), configured {budget}")
+    elif generation["maxOutputTokens"] != budget:
+        problems.append(f"generationConfig.maxOutputTokens forwarded as {generation['maxOutputTokens']!r}, "
+                        f"configured {budget}")
+    for name, key in GEMINI_SAMPLING.items():  # an omitted parameter must be left to Google, not filled in
+        configured = explicit(config, name)
+        explained.add(f"generationConfig.{key}")
+        if configured is None and key in generation:
+            problems.append(f"{name} omitted in configuration but forwarded as generationConfig.{key}="
+                            f"{generation[key]!r}")
+        elif configured is not None and generation.get(key) != configured:
+            problems.append(f"{name} {configured!r} forwarded as generationConfig.{key}={generation.get(key)!r}")
+    for key in GEMINI_UNCONFIGURABLE_SAMPLING:
+        explained.add(f"generationConfig.{key}")
+        if key in generation and not (key in GEMINI_DEFAULT_SAMPLING and generation[key] == GEMINI_DEFAULT_SAMPLING[key]):
+            problems.append(f"generationConfig.{key}={generation[key]!r} forwarded; the configuration sets none")
+    problems.extend(_gemini_thinking_problems(config, generation, explained, unverified, notes))
+    problems.extend(_gemini_tool_problems(config, echo, explained, unverified, notes))
+    replay, hidden_signature = _gemini_replay_problem(echo, returned)
+    if replay is not None:
+        problems.append(replay)
+    if hidden_signature is not None:
+        notes.append("thought signatures forwarded in the replayed turn, one per baseline signature; their values "
+                     f"are redacted in OpenRouter's debug echo ({hidden_signature!r}) and could not be compared")
+    expect = config.adapter_options.get("upstream_expect") or {}
+    expect = expect if isinstance(expect, dict) else {}
+    leaves = _flatten(echo)
+    hidden = {path for path, value in leaves.items() if _hidden(value)}
+    for key, value in expect.items():
+        if _hidden(value):
+            problems.append(f"upstream_expect {key} pins an echo placeholder ({value!r}), not a forwarded value")
+        elif key not in hidden and _at_path(echo, key) != value:
+            problems.append(f"upstream_expect {key}={value!r}, forwarded {_at_path(echo, key)!r}")
+    pinned = set(expect) - hidden  # a hidden value proves nothing, whatever is pinned
+
+    def covered(path: str, by: set[str]) -> bool:
+        return any(path == done or path.startswith(done + ".") for done in by)
+
+    for path, value in leaves.items():
+        if not covered(path, explained | pinned):
+            unverified.setdefault(path, value)
+    for path in [p for p in unverified if covered(p, pinned)]:
+        del unverified[path]  # checked against its pin above
+    return problems, unverified, notes
+
+
+def _gemini_thinking_problems(config: ModelConfiguration, generation: dict[str, Any], explained: set[str],
+                              unverified: dict[str, Any], notes: list[str]) -> list[str]:
+    """thinkingLevel must be the configured effort (OpenRouter maps effort onto it one to one), else, with the
+    effort omitted, absent or the documented default. Other thinkingConfig keys are not determined here."""
+    thinking = _dict(generation.get("thinkingConfig"))
+    effort = explicit(config, "reasoning_effort")
+    setting = config.parameters.get("reasoning_effort")
+    default = (setting.documented_default if setting is not None and setting.state is ParameterState.OMITTED
+               else None)
+    path = "generationConfig.thinkingConfig.thinkingLevel"
+    level = thinking.get("thinkingLevel")
+    if level is None:
+        if effort is not None:
+            return [f"reasoning_effort {effort!r} configured but no {path} was forwarded (thinkingConfig keys "
+                    f"{sorted(thinking)}); Google's default level would apply"]
+        notes.append("no thinkingLevel forwarded: Google's native default applies")
+        return []
+    wanted = effort if effort is not None else default
+    if _hidden(level) or wanted is None:
+        unverified[path] = level
+        return []
+    explained.add(path)
+    return [] if level == wanted else [f"{path} forwarded as {level!r}, configuration implies {wanted!r}"]
+
+
+def _gemini_tool_problems(config: ModelConfiguration, echo: dict[str, Any], explained: set[str],
+                          unverified: dict[str, Any], notes: list[str]) -> list[str]:
+    """With web_search configured the forwarded tools are exactly one Google Search grounding tool (the native
+    engine); without it no search tool is forwarded. No other tool may appear."""
+    tools = echo.get("tools")
+    if tools is None:
+        tools = []
+    elif not isinstance(tools, list):
+        return [f"tools forwarded as {tools!r}"]
+    explained.add("tools")
+    search = [t for t in tools if isinstance(t, dict) and len(t) == 1 and set(t) <= GEMINI_SEARCH_KEYS]
+    others = [t for t in tools if t not in search]
+    problems = []
+    if others:
+        problems.append(f"tools forwarded that the configuration does not request: {others!r}")
+    if _searching(config):
+        if len(search) != 1:
+            problems.append(f"web_search configured but {len(search)} Google Search tools (googleSearch / "
+                            f"google_search) were forwarded: the search would not be Google's own grounding")
+        elif next(iter(search[0].values())) != {}:
+            unverified["tools"] = tools  # options the configuration does not set: pin after review
+        else:
+            notes.append(f"Google Search grounding forwarded as {search[0]!r}")
+    elif search:
+        problems.append(f"Google Search tool forwarded although web_search is not configured: {search!r}")
+    return problems
+
+
+def _gemini_replay_problem(echo: dict[str, Any], returned: dict[str, Any]) -> tuple[str | None, Any]:
+    """The baseline's model turn must reach Google with the same answer text and every thought signature the
+    baseline returned; forwarded thought text, if any, must be the baseline's. Returns the problem and, when the
+    echo hides the signatures, the placeholder (unverifiable, not a contradiction)."""
+    contents = [c for c in echo.get("contents") or [] if isinstance(c, dict)]
+    turns = [c for c in contents if c.get("role") == "model"]
+    if len(turns) != 1:
+        return f"expected the one replayed model turn to be forwarded, found {len(turns)}", None
+    parts = [p for p in turns[0].get("parts") or [] if isinstance(p, dict)]
+    answer = "".join(p["text"] for p in parts if not p.get("thought") and isinstance(p.get("text"), str))
+    baseline = _content_text(returned)
+    if answer.strip() != baseline.strip():
+        return f"replayed answer forwarded as {_preview(answer)}, baseline {_preview(baseline)}", None
+    signatures = _signatures(returned)
+    sent = [p.get("thoughtSignature", p.get("thought_signature")) for p in parts
+            if p.get("thoughtSignature", p.get("thought_signature")) is not None]
+    if signatures:
+        if not sent:
+            return "thought signatures the baseline returned are not forwarded to Google", None
+        if all(_hidden(s) for s in sent):
+            # OpenRouter's debug echo redacts base64 values (seen 2026-11-25: "<base64_redacted>"); the field is
+            # forwarded, only its value is hidden from us. Presence and count are checked; the value cannot be.
+            if len(sent) != len(signatures):
+                return (f"{len(sent)} thought signatures forwarded (values redacted), the baseline returned "
+                        f"{len(signatures)}"), None
+            return None, sent[0]
+        if missing := [s for s in signatures if s not in sent]:
+            return f"{len(missing)} of {len(signatures)} baseline thought signatures not forwarded unchanged", None
+    elif sent:
+        return "thought signatures forwarded although the baseline returned none", None
+    thought = "".join(p["text"] for p in parts if p.get("thought") and isinstance(p.get("text"), str))
+    reasoning = _reasoning_text(returned)
+    # Thought text may be split into several parts: only whitespace differences are tolerated.
+    if thought and (not reasoning or "".join(thought.split()) != "".join(reasoning.split())):
+        return (f"forwarded thought text {_preview(thought)} differs from the baseline's "
+                f"{_preview(reasoning or '')}"), None
+    if reasoning and not thought and not signatures:
+        return "earlier reasoning is not forwarded to Google (it was returned and replayed)", None
+    return None, None
+
+
+def _search_replay_note(execution: NativeExecution, returned: dict[str, Any]) -> str:
+    searches = execution.observations.get("web_search_requests")
+    annotations = _list(returned.get("annotations"))
+    if annotations or (searches is not None and searches.value):
+        return (f"the baseline searched ({searches.value if searches else None} web_search_requests) and its "
+                f"replayed message carried {len(annotations)} annotations")
+    return "the baseline did not search: replay of a message with search annotations was not exercised"
+
+
+def _camel_keys(value: Any) -> Any:
+    """Every dict key in camelCase (thinking_config -> thinkingConfig); values are left as they are."""
+    if isinstance(value, dict):
+        return {re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), str(k)): _camel_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_camel_keys(item) for item in value]
+    return value
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _gemini_text(parts: Any) -> str | None:
+    if not isinstance(parts, list):
+        return None
+    return "".join(p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str))
+
+
+def _flatten(echo: dict[str, Any]) -> dict[str, Any]:
+    """Forwarded values by dotted path; generationConfig and its thinkingConfig are opened key by key."""
+    leaves: dict[str, Any] = {}
+
+    def walk(prefix: str, value: dict[str, Any]) -> None:
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else key
+            if path in GEMINI_EXPANDED and isinstance(item, dict):
+                walk(path, item)
+            else:
+                leaves[path] = item
+
+    walk("", echo)
+    return leaves
+
+
+def _at_path(echo: dict[str, Any], path: str) -> Any:
+    value: Any = echo
+    for key in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
 def _hidden(value: Any) -> bool:
     """An echo placeholder OpenRouter shows instead of a forwarded value."""
     return isinstance(value, str) and HIDDEN_VALUE.match(value) is not None
@@ -732,6 +1178,8 @@ def _stream_accounting(config: ModelConfiguration, chunks: list[dict[str, Any]],
         return {**fields, "cost_incurred": CostIncurred.UNKNOWN.value, "cost_usd": None,
                 "cost_missing_reason": "the stream carried no usage chunk"}
     observations = _observations(config, usage)
+    if "web_search_requests" in observations:
+        fields["web_search_requests"] = observations["web_search_requests"].value
     return {
         **fields,
         "cost_incurred": CostIncurred.YES.value,
@@ -827,6 +1275,58 @@ def _preview(value: Any, limit: int = 60) -> str:
     return repr(text if len(text) <= limit else text[:limit] + "...")
 
 
+def _content_text(message: dict[str, Any]) -> str:
+    """The assistant's answer text: a string, or the text parts of a content list."""
+    content = message.get("content")
+    if isinstance(content, list):
+        return "".join(p["text"] for p in content if isinstance(p, dict) and isinstance(p.get("text"), str))
+    return str(content or "")
+
+
+def _signatures(message: dict[str, Any]) -> list[str]:
+    """Opaque reasoning (Gemini thought signatures) the message carries, in order. OpenRouter's long-decode
+    continuation token is excluded: it is dropped from every turn but the last, so it never reaches the vendor."""
+    return [d["data"] for d in message.get("reasoning_details") or []
+            if isinstance(d, dict) and d.get("type") == "reasoning.encrypted" and isinstance(d.get("data"), str)
+            and d["data"] and d.get("id") != GEMINI_CONTINUATION_ID]
+
+
+def _search_engine_problem(data: dict[str, Any]) -> dict[str, Any] | None:
+    """Evidence that OpenRouter ran a search itself instead of the provider's native search: server-orchestrated
+    tool calls (native searches are not counted in tool_calls_requested), or a server_tools pipeline stage whose
+    mode is explicitly not "native". An absent mode is not evidence either way."""
+    details = (data.get("usage") or {}).get("server_tool_use_details")
+    requested = details.get("tool_calls_requested") if isinstance(details, dict) else None
+    if isinstance(requested, int) and requested > 0:
+        return {"type": "search_engine_mismatch", "tool_calls_requested": requested,
+                "detail": "OpenRouter orchestrated server tool calls: the search was not provider-native"}
+    meta = data.get("openrouter_metadata")
+    for stage in (meta.get("pipeline") or []) if isinstance(meta, dict) else []:
+        if not isinstance(stage, dict) or stage.get("type") != "server_tools":
+            continue
+        stage_data = _dict(stage.get("data"))
+        mode = stage_data.get("mode", stage.get("mode"))
+        if mode is not None and mode != "native":
+            return {"type": "search_engine_mismatch", "pipeline_stage": stage,
+                    "detail": f"server tools ran in mode {mode!r}, not native"}
+    return None
+
+
+def _searches(usage: dict[str, Any], message: dict[str, Any] | None) -> Observation:
+    """Searches as OpenRouter reports them. Google bills Gemini 3+ grounding per search query; OpenRouter documents
+    web_search_requests as the search queries the model made, priced at the endpoint's per-request rate."""
+    source = "openrouter usage.server_tool_use_details.web_search_requests (provider-native search)"
+    details = usage.get("server_tool_use_details")
+    count = details.get("web_search_requests") if isinstance(details, dict) else None
+    if isinstance(count, int):
+        return Observation(value=count, unit="requests", source=source)
+    annotations = (message or {}).get("annotations")
+    if isinstance(annotations, list) and annotations:
+        return Observation.missing("requests", source, "search citations returned but no web_search_requests "
+                                                       "reported")
+    return Observation(value=0, unit="requests", source=f"{source} (none reported)")
+
+
 def _reasoning_text(message: dict[str, Any]) -> str | None:
     text = message.get("reasoning")
     if isinstance(text, str) and text:
@@ -878,7 +1378,8 @@ def _status_failure(status: int, error: dict[str, Any]) -> tuple[FailureKind, Co
     return FailureKind.PROVIDER_ERROR, CostIncurred.NO
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _observations(config: ModelConfiguration, usage: dict[str, Any], message: dict[str, Any] | None = None
+                  ) -> dict[str, Observation]:
     source = "openrouter usage"
     details = usage.get("prompt_tokens_details")
     prompt = usage.get("prompt_tokens")
@@ -906,6 +1407,8 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
     obs["openrouter_charge"] = (
         Observation(value=float(charged), unit="credits", source="openrouter usage.cost")
         if isinstance(charged, int | float) else Observation.missing("credits", "openrouter usage.cost", "not reported"))
+    if _searching(config):
+        obs["web_search_requests"] = _searches(usage, message)
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -930,5 +1433,13 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {key}")
         total += int(tokens) * rate / 1_000_000
+    if searches := obs.get("web_search_requests"):
+        if searches.value is None:
+            return Observation.missing("usd", "configuration pricing", "web_search_requests not reported")
+        if searches.value:
+            search_rate = pricing.get("web_search_usd_per_request")
+            if not isinstance(search_rate, int | float):
+                return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+            total += int(searches.value) * search_rate
     return Observation(value=round(total, 10), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

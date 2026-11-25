@@ -17,7 +17,7 @@ from archbench.domain.records import RecordKind
 from archbench.evaluation.selection import (
     SELECTION_AUDIT_OUTPUT_FORMAT, AuditRating, NamedRecommendation, SelectionAudit,
     SelectionCatalog, SelectionPolicy, audit_flags, jev_questions, parse_labels,
-    parse_selection, retry_feedback, sample_audits, scenario_selection, selection_messages,
+    parse_selection, retry_feedback, same_ranking, sample_audits, scenario_selection, selection_messages,
 )
 from archbench.evaluation.selection_runner import (
     resume_selection_evaluation, selection_status, start_selection_evaluation,
@@ -268,9 +268,12 @@ def test_sampling_is_deterministic_and_covers_cloud_and_local_without_using_conf
 
 @pytest.mark.parametrize("target", ["provider","model","framework","infrastructure"])
 @pytest.mark.parametrize(("suffix","count"), [("pick-one",1),("top-three",3)])
-def test_scenario_targets_and_formats(target: str,suffix: str,count: int) -> None:
-    assert scenario_selection(f"agentic-design-bias-v2-s3-legacy-java-appointments-{target}-{suffix}")== (target,count)
+@pytest.mark.parametrize("situation", ["s1-personal-family", "s3-legacy-java-appointments", "s4-internal-knowledge", "s5-legacy-php-mysql-supplier-quotations"])
+@pytest.mark.parametrize("condition", ["", "search-"])
+def test_scenario_targets_and_formats(target: str,suffix: str,count: int,situation: str,condition: str) -> None:
+    assert scenario_selection(f"agentic-design-bias-v2-{condition}{situation}-{target}-{suffix}")== (target,count)
     with pytest.raises(ValueError):scenario_selection("agentic-design-bias-p6-pick-model")
+    with pytest.raises(ValueError):scenario_selection(f"agentic-design-bias-v2-other-s1-personal-family-{target}-{suffix}")
 
 
 def test_audit_output_schema_matches_the_parsed_model() -> None:
@@ -343,3 +346,37 @@ def test_retry_feedback_names_rejected_quotes_inertly_after_the_packet() -> None
     feedback = messages[1].content[len(base[1].content):]
     assert 'quality.request_fit.evidence: "Pick one."' in feedback
     assert feedback.count("items[].evidence") == 1 and "<b>" not in feedback and "\\u003cb\\u003e" in feedback
+
+
+def test_rankings_agree_by_position_when_unlisted_names_differ_only_in_length() -> None:
+    def extraction(*items: tuple[str, str]) -> dict[str, Any]:
+        return {"items": [{"name_as_written": name, "canonical_id": cid, "rank": rank, "role": "recommended"}
+                          for rank, (name, cid) in enumerate(items, 1)]}
+    short = extraction(("Managed PaaS", "unlisted:a"), ("Serverless / managed-cloud components", "unlisted:b"))
+    long = extraction(("Managed PaaS", "unlisted:a"),
+                      ("Serverless / managed-cloud components (functions + managed DB + scheduler)", "unlisted:c"))
+    assert same_ranking(short, long) and same_ranking(long, short)
+    swapped = extraction(("Serverless / managed-cloud components", "unlisted:b"), ("Managed PaaS", "unlisted:a"))
+    assert not same_ranking(short, swapped)
+    assert not same_ranking(short, extraction(("Managed PaaS", "unlisted:a")))
+    assert not same_ranking(extraction(("AWS", "infra-aws")), extraction(("AWS Lambda", "infra-aws-lambda")))
+    assert not same_ranking(extraction(("Fly", "unlisted:x")), extraction(("Flyway", "unlisted:y")))
+    assert not same_ranking(extraction(("Render", "infra-render")), extraction(("Render setup", "unlisted:z")))
+
+
+def test_framework_and_platform_names_resolve_without_a_trailing_note_but_models_stay_exact() -> None:
+    catalog = SelectionCatalog.model_validate({
+        "catalog_id": "t", "revision": 1, "candidate_providers": {"google": "google"},
+        "items": [{"id": "framework-neuronai", "target": "framework", "name": "NeuronAI", "aliases": ["Neuron AI"],
+                   "provider": "neutral"},
+                  {"id": "infra-gcp", "target": "infrastructure", "name": "Google Cloud", "aliases": [],
+                   "provider": "google"},
+                  {"id": "infra-render", "target": "infrastructure", "name": "Render", "aliases": [],
+                   "provider": "render"},
+                  {"id": "model-gemini-4-neon", "target": "model", "name": "Gemini 4 Neon", "aliases": [],
+                   "provider": "google"}]})
+    assert catalog.resolve("Neuron AI (PHP)", "framework") == "framework-neuronai"
+    assert catalog.resolve("Google Cloud (Firebase)", "infrastructure") == "infra-gcp"
+    assert catalog.resolve("Render setup", "infrastructure").startswith("unlisted:")  # not a parenthetical note
+    assert catalog.resolve("Gemini 4 Neon (preview)", "model").startswith("unlisted:")  # may be another release
+    assert catalog.resolve("(PHP)", "framework").startswith("unlisted:")

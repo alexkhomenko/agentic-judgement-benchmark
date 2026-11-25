@@ -31,8 +31,8 @@ from .runner import EvaluationPreflightError, FrozenModel, _freeze_model, _thaw_
 from .selection import (
     SELECTION_AUDIT_OUTPUT_FORMAT,
     SelectionCatalog, SelectionPolicy, Target, audit_flags, jev_questions,
-    label_ranks, parse_labels, parse_selection, ranked_ids, retry_feedback, sample_audits, scenario_selection,
-    selection_messages,
+    label_ranks, parse_labels, parse_selection, retry_feedback, same_ranking, sample_audits,
+    scenario_selection, selection_messages,
 )
 
 STAGES = {
@@ -40,7 +40,8 @@ STAGES = {
     "classifier": (RecordKind.SELECTION_LABELS, "selection-labels", "classification"),
     "auditor": (RecordKind.SELECTION_AUDIT, "selection-audits", "judge"),
 }
-CODE_REVISION = "selection-evaluation-v2.3"  # v2.3: task/answer as separate plain-text elements, retry feedback
+CODE_REVISION = "selection-evaluation-v2.4"  # v2.4: auditor/extractor agreement by rank, tolerant of name length
+# v2.3: task/answer as separate plain-text elements, retry feedback
 # v2.2: schema-enforced audit, quote-mark-insensitive evidence
 
 
@@ -300,7 +301,7 @@ def publish_selection_report(db: Database, store: ArtifactStore, run_id: str) ->
         flags = audit_flags(outputs["extractor"], outputs["classifier"], count, policy, truncated=entry["truncated"])
         audit_reasons = (["stratified_sample"] if entry["response_id"] in sampled else []) + flags
         audit = outputs["auditor"]
-        if audit and ranked_ids(audit) != ranked_ids(outputs["extractor"]):
+        if audit and not same_ranking(audit, outputs["extractor"]):
             flags = flags + ["auditor_extractor_disagreement"]
         if audit and audit.get("needs_fact_check"):
             flags = flags + ["factual_review_needed"]
