@@ -119,13 +119,96 @@ def cmd_evaluation_status(ws: Workspace, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evaluate_v2(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.selection_runner import resume_selection_evaluation, start_selection_evaluation
+    from .evaluation.selection_completion import publish_selection_report, selection_status
+    registry = ws.registry()
+    try:
+        run_id = args.resume
+        if run_id:
+            run = ws.db.get_record(run_id)
+            if run is None or run.experiment_id != args.experiment_id:
+                raise ValueError("resume run does not belong to the requested experiment")
+        else:
+            run_id = start_selection_evaluation(ws.db, ws.store, registry, args.experiment_id,
+                Path(args.policy), base=ws.project, code_revision=ws.code_revision()).record_id
+        resume_selection_evaluation(ws.db, ws.store, registry, run_id)
+        report = publish_selection_report(ws.db, ws.store, run_id)
+    except (ValueError, RuntimeError) as exc:
+        print(f"v2 evaluation not completed: {exc}", file=sys.stderr)
+        return 2
+    status = selection_status(ws.db, run_id)
+    _print({**status, "report_id": report.record_id,
+            "artifacts": {name: ref.relpath for name, ref in ws.db.artifacts_for(report.record_id).items()}})
+    return 0 if status["all_required_work_resolved"] else 1
+
+
+def cmd_selection_status(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.selection_completion import selection_status
+    _print(selection_status(ws.db, args.evaluation_run_id))
+    return 0
+
+
+def cmd_review(ws: Workspace, args: argparse.Namespace) -> int:
+    import webbrowser
+
+    from .evaluation.review_app import ReviewApp, ReviewSurface, serve
+    from .domain.records import RecordKind
+
+    run = ws.db.get_record(args.evaluation_run_id)
+    app: ReviewSurface
+    if run and run.kind is RecordKind.SELECTION_EVALUATION_RUN:
+        from .evaluation.selection_review import SelectionReviewApp
+        app = SelectionReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
+    else:
+        app = ReviewApp(ws.db, ws.store, args.evaluation_run_id, args.reviewer)
+    server, url = serve(app, args.port)
+    queue = app.queue()
+    print(f"checking {queue['total']} response(s) of {args.evaluation_run_id} as {args.reviewer}: "
+          f"{queue['done']} done, {queue['total'] - queue['done']} to go")
+    print(f"open {url}  (Ctrl-C to stop; every decision is saved as you make it)")
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    queue = app.queue()
+    print(f"\nstopped: {queue['done']}/{queue['total']} checked, {queue['counts']['flagged']} flagged")
+    return 0
+
+
+def cmd_review_v2(ws: Workspace, args: argparse.Namespace) -> int:
+    from .evaluation.review_app import serve
+    from .evaluation.selection_inbox import SelectionInboxApp
+
+    app = SelectionInboxApp(ws.db, ws.store, args.reviewer)
+    server, url = serve(app, args.port)
+    queue = app.queue()
+    print(f"v2 inbox: {queue['total']} answers; {queue['counts']['needs_review']} unresolved; "
+          f"{queue['counts']['blocked']} blocked; {queue['done']} approved")
+    print(f"open {url}  (Ctrl-C to stop; the inbox discovers new answers automatically)")
+    if not args.no_browser:
+        import webbrowser
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
 def cmd_review_export(ws: Workspace, args: argparse.Namespace) -> int:
     from .evaluation.review import export_reviews
     from .evaluation.runner import load_run
 
     ctx = load_run(ws.db, args.evaluation_run_id)
     written = export_reviews(ws.db, ws.store, ctx.run, Path(args.out))
-    print(f"exported {len(written) // 2} blinded review packet(s) to {args.out}")
+    print(f"exported {len(written) // 2} flagged response(s) for full review to {args.out}")
     return 0
 
 
@@ -157,9 +240,74 @@ def cmd_adjudicate(ws: Workspace, args: argparse.Namespace) -> int:
 
 
 def cmd_report(ws: Workspace, args: argparse.Namespace) -> int:
+    from .domain.records import RecordKind
+
+    run = ws.db.get_record(args.evaluation)
+    if run and run.kind is RecordKind.SELECTION_EVALUATION_RUN:
+        from .reporting.selection_report import publish
+        record = publish(ws.db, ws.store, args.experiment_id, args.evaluation, code_revision=ws.code_revision())
+        path = ws.results / args.experiment_id / "reports" / record.record_id / "report.html"
+        print(f"report revision {record.record_id}: {path}")
+        return 0
     record = publish_report(ws.db, ws.store, args.experiment_id, args.evaluation, code_revision=ws.code_revision())
     path = ws.results / args.experiment_id / "reports" / record.record_id / "report.md"
     print(f"report revision {record.record_id}: {path}")
+    return 0
+
+
+def cmd_cross_report(ws: Workspace, args: argparse.Namespace) -> int:
+    from .reporting.cross_model import CrossModelError, publish
+
+    scenarios = (ws.project / args.scenarios) if args.scenarios else None
+    try:
+        data = publish(ws.db, ws.store, args.evaluation_run_ids, Path(args.out), scenarios=scenarios, title=args.title)
+    except CrossModelError as exc:
+        print(f"cross-model report not written: {exc}", file=sys.stderr)
+        return 2
+    models = len({c["configuration"] for c in data["cells"]})
+    print(f"wrote {args.out}: {models} model(s), {len(data['runs'])} evaluation run(s), data {data['data_sha256'][:16]}")
+    return 0
+
+
+def cmd_matrix(ws: Workspace, args: argparse.Namespace) -> int:
+    from .reporting.matrix import build_matrix, render_html
+
+    targets = ws.project / args.targets
+    if args.out:
+        data = build_matrix(ws.db, ws.store, ws.project, targets)
+        Path(args.out).write_text(render_html(data))
+        print(f"wrote {args.out}")
+        return 0
+    import http.server
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server naming
+            if self.path not in ("/", "/data.json"):
+                self.send_error(404)
+                return
+            try:
+                data = build_matrix(ws.db, ws.store, ws.project, targets)
+                body = (json.dumps(data) if self.path == "/data.json" else render_html(data, refresh_s=60)).encode()
+                kind = "application/json" if self.path == "/data.json" else "text/html; charset=utf-8"
+            except Exception as exc:  # keep serving; show the problem instead of dying mid-campaign
+                body, kind = f"matrix error: {type(exc).__name__}: {exc}".encode(), "text/plain; charset=utf-8"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", args.port), Handler)  # one thread: the SQLite connection is per-thread
+    print(f"matrix: http://127.0.0.1:{args.port}/  (refreshes every 60s; Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 
@@ -222,18 +370,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("evaluation_run_id")
     p.set_defaults(func=cmd_evaluation_status)
 
-    p = sub.add_parser("review-export", help="export blinded packets and templates for selected human reviews")
+    p = sub.add_parser("evaluate-v2", help="Luna extraction, Jev preference labels, sampled/flagged Haiku audits")
+    p.add_argument("experiment_id")
+    p.add_argument("--policy", default="configs/evaluation/agentic-design-bias-v2.yaml")
+    p.add_argument("--resume", metavar="EVALUATION_RUN_ID")
+    p.set_defaults(func=cmd_evaluate_v2)
+
+    p = sub.add_parser("selection-status", help="show v2 preference-label evaluation coverage")
+    p.add_argument("evaluation_run_id")
+    p.set_defaults(func=cmd_selection_status)
+
+    p = sub.add_parser("review", help="open the review app: check every response's judgement, approve or flag it")
+    p.add_argument("evaluation_run_id")
+    p.add_argument("--reviewer", required=True, help="your reviewer identifier, recorded on every check")
+    p.add_argument("--port", type=int, default=0, help="local port (default: any free port)")
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("review-v2", help="one live inbox for every v2 answer, unresolved and newest first")
+    p.add_argument("--reviewer", required=True, help="reviewer identifier recorded with each decision")
+    p.add_argument("--port", type=int, default=8766, help="stable local port (default: 8766)")
+    p.add_argument("--no-browser", action="store_true", help="print the URL instead of opening a browser")
+    p.set_defaults(func=cmd_review_v2)
+
+    p = sub.add_parser("review-export", help="export blinded packets and templates for flagged responses")
     p.add_argument("evaluation_run_id")
     p.add_argument("--out", required=True, help="directory for reviewer files (never overwritten)")
     p.set_defaults(func=cmd_review_export)
 
-    p = sub.add_parser("review-import", help="import completed human review files")
+    p = sub.add_parser("review-import", help="import completed full human review files")
     p.add_argument("evaluation_run_id")
     p.add_argument("files", nargs="+")
     p.add_argument("--supersede", action="store_true", help="record a correction of the reviewer's prior review")
     p.set_defaults(func=cmd_review_import)
 
-    p = sub.add_parser("adjudicate", help="append adjudication records for reviewed and agreeing responses")
+    p = sub.add_parser("adjudicate", help="append adjudication records for checked and reviewed responses")
     p.add_argument("evaluation_run_id")
     p.set_defaults(func=cmd_adjudicate)
 
@@ -241,6 +412,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("experiment_id")
     p.add_argument("--evaluation", required=True)
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("matrix", help="live question x model progress page: answers done / target, spend, projection")
+    p.add_argument("--targets", default="configs/experiments/agentic-design-bias-v2/targets.yaml")
+    p.add_argument("--port", type=int, default=8767)
+    p.add_argument("--out", default=None, help="write a static HTML file instead of serving")
+    p.set_defaults(func=cmd_matrix)
+    p = sub.add_parser("cross-report", help="write a static HTML report comparing models across evaluation runs")
+    p.add_argument("evaluation_run_ids", nargs="+", help="one evaluation run per probe and model")
+    p.add_argument("--out", required=True, help="HTML file to write")
+    p.add_argument("--scenarios", help="probe family directory, to list probes that have no answers yet")
+    p.add_argument("--title", default="Agentic design bias")
+    p.set_defaults(func=cmd_cross_report)
 
     p = sub.add_parser("inspect", help="inspect one invocation attempt")
     p.add_argument("attempt_id")

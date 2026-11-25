@@ -10,7 +10,7 @@ blind, and publishes versioned reports.
 |---|---|
 | 1. Domain schemas, artifact storage, task ledger, fake adapter | Done and tested |
 | 2. Native cloud adapter, qualified local MLX configuration | Anthropic, OpenAI Responses, and Gemini generateContent adapters run live (candidates, judges, extraction, live continuation qualification). Mistral chat-completions adapter qualified live (with and without reasoning), no experiment run yet. xAI (Grok) adapter, reusing the OpenAI Responses adapter, qualified live. DeepSeek chat-completions adapter done and tested offline. Kimi (Moonshot AI) chat-completions adapter done and tested offline. GLM (Z.ai / Zhipu AI) chat-completions adapter done and tested offline. MiniMax (Anthropic-compatible Messages API) adapter done and tested offline. Cohere Chat API v2 adapter done and tested offline. Amazon Bedrock Converse adapter (Amazon Nova models only) done and tested offline. Meta Model API adapter (Muse, reusing the OpenAI Responses adapter) done and tested offline. Microsoft MAI chat-completions adapter (your own Foundry deployment) qualified live with MAI-Thinking-1. OpenRouter adapter (Qwen4-Max pinned to Alibaba's own endpoint) qualified live. TypeSafe Jev adapter done and tested offline. Local Ollama adapter (pinned digest and engine) run live with Qwen 3.5 9B on the MLX runner. Direct MLX-LM worker qualified live with the spec's LOCAL-001 (`mlx-community/Qwen3.5-9B-4bit`), including the full-context memory preflight; no experiment run yet |
-| 3. Evaluation path: validation, blind judges, human review, adjudication, classification, report | Done and tested with fake judges; calibration pending |
+| 3. Evaluation path: validation, blind judges, human check of every judgement, review of flagged ones, adjudication, classification, report | Done and tested with fake judges; calibration pending |
 | 4–5. Pilot and full experiment | Not started |
 
 The `fake` and `fake-judge` adapters need no credentials and produce meaningless scores; they exist to
@@ -127,6 +127,8 @@ worker crash. Qualification covers the spec's engine checks (section 6.3), inclu
 fills the whole context window. Mixing `mlx-lm` and Ollama results means comparing different weights
 (affine 4-bit vs nvfp4), engines, and prompt renderers.
 
+GPT-OSS uses native Harmony channels and its `thinking` history field; Muse uses self/user recipient messages. The MLX adapter parses these formats before scoring and preserves their native reasoning fields during continuation.
+
 ## Setup
 
 ```sh
@@ -150,6 +152,13 @@ python3.12 -m venv .venv-mlx
 # to pin another checkpoint, print its file manifest for adapter_options.files:
 .venv-mlx/bin/python -I src/archbench/workers/mlx_worker.py manifest <repository> <revision>
 ```
+
+For agentic-design-bias v2, `bench evaluate-v2 <experiment-id>` uses the dedicated
+[selection policy](configs/evaluation/agentic-design-bias-v2.yaml): Luna extraction and
+Jev labels for every response, with Haiku auditing a 10% sample and all flagged cases.
+`bench selection-status <run-id>` shows coverage. JSON and CSV report paths are printed
+by the evaluation command. The [v2 review notes](scenarios/agentic-design-bias-v2/README.md)
+explain calibration, frozen inputs, resume, and the separation from v1 quality scores.
 
 ## Credentials
 
@@ -185,6 +194,13 @@ SDK defaults apply (`ANTHROPIC_API_KEY` or `ant auth login`; `OPENAI_API_KEY`; `
 benchmark results. `bench qualify` makes three tiny live probe calls to prove branching works.
 
 ## Agentic-design-bias probes
+
+The [v2 question set](scenarios/agentic-design-bias-v2/README.md) adds 40 independent,
+requirement-conditioned questions for review: a personal family assistant, a swimming coach's
+greenfield SaaS, an existing on-premises Java appointment application, an internal knowledge
+assistant, and supplier quotation processing in an existing PHP and MySQL application. Each situation asks for
+one choice or a ranked top three for model provider, model, agentic framework, and infrastructure.
+See the v2 question set for its run conditions and evaluation policy; the workflow below describes v1.
 
 `scenarios/agentic-design-bias/` holds six terse, independent single-round probes (P1–P6) that measure
 how models recommend agent architectures, frameworks, and models;
@@ -233,12 +249,52 @@ bench qualify configs/experiments/fake-smoke.yaml           # persisted qualific
 bench plan configs/experiments/fake-smoke.yaml              # freeze the experiment plan
 bench run fake-smoke-001                                    # execute or resume the branching graph
 bench evaluate fake-smoke-001 --policy configs/evaluation/default.yaml
-#   validation -> blinded packets -> two independent judges -> classification -> review selection
-bench review-export <evaluation-run> --out reviews/         # blinded packets + empty templates
+#   validation -> blinded packets -> two independent judges -> classification -> attention signals
+bench review <evaluation-run> --reviewer <you>              # check every judgement in the review app
+bench review-export <evaluation-run> --out reviews/         # flagged responses only: blinded packets + templates
 bench review-import <evaluation-run> reviews/*.review.json  # --supersede records a correction
 bench adjudicate <evaluation-run>
 bench report fake-smoke-001 --evaluation <evaluation-run>
 ```
+
+### Human checks
+
+`bench review` opens a local page (127.0.0.1 only) that walks through every response of the run. Each
+screen shows the rendered answer, with the passages the judges and the extractor cited highlighted, next to
+each judge's ratings, rationales and quotes, the critical-failure candidates, and the extraction. Candidate
+identity stays hidden, and responses are ordered by round and random packet id. The header shows how many
+responses are checked, approved, flagged and left; the sidebar lists every response with its state and marks
+the ones whose judges raised something worth a close look.
+
+- **Looks right** (`A`): the judge mean stands. Confirm or reject each critical-failure candidate first.
+- **Flag** (`F`): tick what looks wrong (a judge, the extraction, or the answer itself) and say why. A flag on
+  a judge or the answer holds the score until a full blind re-score (`review-export` / `review-import`); an
+  extraction-only flag is listed in the report (`human-check-flags.csv`) and does not block scoring.
+- `J`/`K` move between responses, `N` jumps to the next unchecked one, and `?` lists every shortcut.
+
+Every decision is saved as an append-only `human_check` record the moment it is made; changing your mind
+supersedes the earlier record. A check names the judge and extraction records it saw. If those change (for
+example a judge that was missing completes on resume), the check goes stale and the response needs another
+check. Adjudication waits until every response is checked and every blocking flag is fully reviewed.
+
+### Cross-model report
+
+`bench cross-report` compares models across evaluation runs as one static, self-contained HTML file (inline CSS and
+SVG, no scripts or external requests), ready to publish anywhere:
+
+```sh
+bench cross-report evr-69fa320525c64c75 evr-13ec817f41224e4f evr-e112dca0a93f4022 \
+    evr-30111b46b2124cab evr-2850fdb90275448c \
+    --scenarios scenarios/agentic-design-bias --out results/published/agentic-design-bias.html
+```
+
+Name one evaluation run per probe and model; a second run covering the same pair is rejected rather than merged.
+For each probe the page shows which vendor each model recommends first, self-preference against a baseline pooled
+from every other vendor's model on that probe, rubric quality and per-dimension ratings, and a coverage grid that
+also lists answers no included run evaluates. Quality is the adjudicated score where one exists, otherwise the
+judges' mean, marked provisional. The page lists every run, policy, judge, extractor and catalog it used, embeds
+the aggregated data as JSON, and states its caveats (unchecked judgements, judges sharing a candidate's vendor,
+mixed policies, draft catalog, sample size).
 
 Use `bench evaluate <exp> --resume <evaluation-run>` to continue an interrupted evaluation and
 `bench evaluation-status <evaluation-run>` to see stage coverage. Results go to `results/` by default
@@ -256,6 +312,62 @@ Use `bench evaluate <exp> --resume <evaluation-run>` to continue an interrupted 
   reason. Candidate text cannot close the packet delimiter.
 - Corrections create superseding records. Reports name exact record IDs, are reproducible, never mix
   evaluation runs or policies, and say when they are incomplete.
+
+## V2 one-answer slice
+
+Use one shared inbox for all v2 answers:
+
+```sh
+bench review-v2 --reviewer alexander --port 8766 --no-browser
+```
+
+Open `http://127.0.0.1:8766/`. The inbox discovers existing and new v2 answers from the results database,
+including answers awaiting evaluation. Unresolved items come first, newest evidence first within each group;
+approved items remain below. The page refreshes its queue every 15 seconds without replacing an answer or
+an unsaved flag note while you are reviewing it. Filters cover human status, blocked evaluations, question,
+and active evaluation policy. Human-review status and automated readiness are displayed separately.
+
+Each generated answer appears once. Its newest evaluation is active, and earlier evaluation versions and
+reviews remain in the item's history. A new evaluation requires a new review; old approvals never silently
+transfer. Existing approvals against unchanged evidence carry over. New evidence prompts an explicit reload
+before saving a decision. The inbox provides failure details, recovery guidance and a full report link;
+opening the report deliberately reveals candidate identity. Browsing, filtering and reviewing make no model
+calls. Missing preference/compliance labels continue to block approval. If only the required quality audit
+has exhausted its retries, **Proceed with audit unavailable** provides an explicit human resolution and
+requires a note. The audit failures remain recorded and its quality scores remain missing. Such an item
+can count as reviewed and its run can complete once coverage is balanced and all other work is resolved;
+the reports still state that automatic outputs were not all valid.
+
+V2 compares cloud models only; local models are excluded because their older training cutoffs make
+their answers incomparable. A v2 slice is an experiment config with one question and one or more cloud
+configurations from the [roster lock](configs/experiments/agentic-design-bias-v2/roster.lock.yaml):
+
+```sh
+bench qualify <slice-config.yaml>
+bench plan <slice-config.yaml>
+bench run <experiment-id>
+bench evaluate-v2 <experiment-id>
+bench review <selection-evaluation-run> --reviewer alexander
+bench selection-status <selection-evaluation-run>
+bench report <experiment-id> --evaluation <selection-evaluation-run>
+```
+
+V2 review shows the answer, Luna's extracted recommendations, Jev's preference and compliance labels,
+and any Haiku quality audit. Automated flags appear explicitly above the answer. **Proceed** is the primary
+action; it requires a human click (or Ctrl+Enter). **Flag for follow-up** requires a note and blocks completion
+until resolved. Opening the page never approves an answer. Each decision is append-only and records the
+exact evidence seen; changed evaluation evidence makes the decision stale. Reports and `selection-status`
+require balanced candidate coverage, valid preference/compliance outputs, a valid or explicitly human-resolved
+quality audit where required, and human approval of every answer
+before reporting completion. A slice covers only its own models and question, not the full v2 roster.
+
+For v2, `bench report` writes a self-contained `report.html`, a Markdown version, `report.json`, and an
+input manifest under `results/<experiment>/reports/<revision>/`. The report includes full answers, every
+evaluation attempt (including failed outputs and retries), human validation, measured runtime and API cost,
+qualification checks, exact model settings, and evidence hashes. Reporting makes no model calls.
+Reviewed report revisions record the human review policy separately from the frozen automatic judging
+policy. The original automatic reports and attempts remain immutable. Human audit resolutions become
+stale when evaluation evidence changes and must then be reviewed again.
 
 ## Open calibration decisions
 

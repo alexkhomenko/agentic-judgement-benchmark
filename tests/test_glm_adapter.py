@@ -297,3 +297,80 @@ def test_glm_candidate_in_a_cross_vendor_p6_run(env: Env) -> None:
     row = rows["glm-5.3@1"]
     assert row["own_vendor"] == "zhipu" and row["own_first.k"] == "2"
     assert float(row["own_first_delta"]) == 1.0
+
+
+# ----- web search (server-side "Web Search in Chat") ---------------------------------------------------------------
+
+SEARCH_TOOL: dict[str, Any] = {"type": "web_search",
+                               "web_search": {"enable": True, "search_engine": "search_pro_jina", "search_result": True}}
+SEARCH_RESULTS = [{"title": "T", "content": "summary", "link": "https://example.com", "media": "Example",
+                   "icon": "https://example.com/i.png", "refer": "ref_1", "publish_date": "2026-11-20"}]
+
+
+def searching_config(tool: dict[str, Any] = SEARCH_TOOL, **pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": tool}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def searched(results: list[dict[str, Any]] | None = SEARCH_RESULTS, finish: str = "stop") -> httpx2.Response:
+    body = completion("Answer.", finish=finish)
+    if results is not None:
+        body["web_search"] = results
+    return httpx2.Response(200, json=body)
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    mock = MockGlm(reply=searched())
+    outcome, _ = call(tmp_path, mock, searching_config(web_search_usd_per_request=0.01))
+    assert json.loads(mock.requests[0].content)["tools"] == [SEARCH_TOOL] and len(mock.requests) == 1
+    assert outcome.succeeded and outcome.extracted.final_answer == "Answer."
+    assert outcome.observations["web_search_requests"].value == 1
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST + 0.01)
+    outcome, _ = call(tmp_path, MockGlm(reply=searched()), searching_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, MockGlm(reply=searched(None)), searching_config())
+    assert outcome.observations["web_search_requests"].value == 0  # no results returned: no search
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(EXPECTED_COST)
+    plain = MockGlm()
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+
+
+def test_searches_are_unknown_without_search_result(tmp_path: Path) -> None:
+    tool = {"type": "web_search", "web_search": {"enable": True, "search_engine": "search_pro_jina"}}
+    outcome, _ = call(tmp_path, MockGlm(reply=searched(None)), searching_config(tool, web_search_usd_per_request=0.01))
+    assert outcome.succeeded and outcome.observations["web_search_requests"].value is None
+    assert outcome.observations["api_cost_usd"].missing_reason == "web_search_requests not known"
+
+
+def test_search_ending_in_tool_calls_is_an_incomplete_failure(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, MockGlm(reply=searched(finish="tool_calls")), searching_config())
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and outcome.cost_incurred is CostIncurred.YES
+    assert '"incomplete"' in str(outcome.error)
+
+
+@pytest.mark.parametrize("value", [
+    {"type": "web_search", "web_search": {"search_engine": "search_pro_jina"}},  # enable defaults to false
+    {"type": "web_search", "web_search": {"enable": "True"}},
+    {"type": "function", "function": {"name": "web_search"}},
+    {"type": "web_search"},
+])
+def test_web_search_value_must_be_an_enabled_web_search_tool(value: dict[str, Any]) -> None:
+    with pytest.raises(AdapterError) as raised:
+        MockGlm().adapter().prepare(searching_config(value), MESSAGES, None, ctx())
+    assert raised.value.kind is FailureKind.INVALID_STATE
+
+
+def test_continuation_after_a_search_replays_the_message_and_offers_the_tool(tmp_path: Path) -> None:
+    mock = MockGlm()
+    adapter = mock.adapter()
+    config = searching_config()
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    sent = json.loads(mock.requests[1].content)
+    assert sent["messages"][2] == completion(mock.answer)["choices"][0]["message"] and sent["tools"] == [SEARCH_TOOL]

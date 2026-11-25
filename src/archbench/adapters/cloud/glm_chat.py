@@ -26,10 +26,31 @@ Configuration parameters (all others are rejected at qualification):
     reasoning_effort   explicit or omitted  -> reasoning_effort (GLM-5.3: "low" | "high" | "max")
     temperature        explicit or omitted  -> temperature
     top_p              explicit or omitted  -> top_p
+    web_search         explicit or omitted  -> tools: [value] (the web search tool, sent verbatim, e.g.
+                                               {type: web_search, web_search: {enable: true, search_engine:
+                                               search_pro_jina, search_result: true}})
 adapter_options:
     base_url: https://api.z.ai/api/paas/v4 (default; mainland: https://open.bigmodel.cn/api/paas/v4)
     timeout_s: 900 (default; Z.ai documents no server-side limit)
-    pricing: {input_usd_per_mtok (cache miss), cached_input_usd_per_mtok, output_usd_per_mtok, source, verified_on}
+    pricing: {input_usd_per_mtok (cache miss), cached_input_usd_per_mtok, output_usd_per_mtok,
+              web_search_usd_per_request?, source, verified_on}
+
+Web search ("Web Search in Chat", verified 2026-11-24; https://docs.z.ai/api-reference/llm/chat-completion,
+https://docs.z.ai/guides/tools/web-search): the `web_search` tool runs server-side inside the one request, with
+no tool round trip. `web_search.enable` must be true (the documented default is false). Engines: the API schema
+lists only `search_pro_jina` (the default) while the guide's example uses `search-prime`; the mainland platform
+offers search_std / search_pro / search_pro_sogou / search_pro_quark at 0.01 / 0.03 / 0.05 / 0.05 CNY per call
+(https://docs.bigmodel.cn/cn/guide/tools/web-search). Other options: count (1-50, default 10), search_recency_filter,
+search_domain_filter, content_size (medium | high), search_query / require_search (force a search or a
+search-grounded answer), and search_prompt, whose default injects "The current date is {{current_date}}" and
+asks for answers "without citing data sources". Z.ai prices Web Search at $0.01 per use
+(https://docs.z.ai/guides/overview/pricing). Search results are part of the input and billed in prompt_tokens.
+Usage reports no search count. With `search_result: true` the response carries the results in a top-level
+`web_search` array, and web_search_requests is 1 when that array is non-empty, else 0 (one search per request,
+inferred from the single result list). Without `search_result: true` the searches cannot be counted:
+web_search_requests and the cost are missing. A `tool_calls` finish while searching is an incomplete failure.
+Results are not part of the assistant message, so continuation replay is unchanged; follow-up turns offer the
+tool again.
 """
 
 from __future__ import annotations
@@ -66,7 +87,7 @@ DEFAULT_TIMEOUT_S = 900
 MAX_OUTPUT_TOKENS = 131072
 PROBE_MAX_TOKENS = 2048
 SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "thinking", "clear_thinking", "reasoning_effort",
-                                  "temperature", "top_p"})
+                                  "temperature", "top_p", "web_search"})
 TransportFactory = Callable[[], httpx2.BaseTransport]
 _NO_KEY = ("no Z.ai credentials found: add zhipu.api_key to secrets.local.yaml (see secrets.example.yaml) "
            "or set ZAI_API_KEY")
@@ -252,6 +273,13 @@ class GlmAdapter:
         for name in ("reasoning_effort", "temperature", "top_p"):
             if (value := explicit(config, name)) is not None:
                 body[name] = value
+        if (web_search := explicit(config, "web_search")) is not None:
+            options = web_search.get("web_search") if isinstance(web_search, dict) else None
+            if (not isinstance(options, dict) or web_search.get("type") != "web_search"
+                    or options.get("enable") is not True):
+                raise AdapterError(FailureKind.INVALID_STATE, "web_search must be an enabled web search tool "
+                                                              "{type: web_search, web_search: {enable: true, ...}}")
+            body["tools"] = [copy.deepcopy(web_search)]
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -298,7 +326,8 @@ class GlmAdapter:
             raise AdapterError(FailureKind.HARNESS_ERROR, "request body on the wire differs from the prepared body",
                                CostIncurred.YES)
         data = response.json()
-        observations = _observations(config, data.get("usage") or {})
+        observations = _observations(config, data.get("usage") or {},
+                                     search=_search_count(body["tools"][0], data) if "tools" in body else None)
         choice = _choice(data)
         reason = choice.get("finish_reason")
         request_id = data.get("request_id") or data.get("id")
@@ -319,6 +348,9 @@ class GlmAdapter:
             return failure(FailureKind.CONTEXT_EXCEEDED, {"type": "finish_reason", "reason": reason})
         if reason == "network_error":  # inference ended abnormally on the provider side
             return failure(FailureKind.TRANSIENT_TRANSPORT, {"type": "finish_reason", "reason": reason})
+        if reason == "tool_calls" and "tools" in body:  # the server-side search did not reach a final answer
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                        "detail": "web search ended in tool_calls, not an answer"})
         if reason not in ("stop", "length"):  # tool_calls (no tools are sent), undocumented values
             return failure(FailureKind.PROVIDER_ERROR, {"type": "finish_reason", "reason": reason})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason,
@@ -403,7 +435,17 @@ def _http_failure(status: int, code: str | None) -> tuple[FailureKind, CostIncur
     return FailureKind.PROVIDER_ERROR, CostIncurred.NO
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _search_count(tool: dict[str, Any], data: dict[str, Any]) -> Observation:
+    """Searches for one response: Z.ai reports no count, so it is read from the returned search results."""
+    source = "glm response web_search field (one search per request)"
+    if (tool.get("web_search") or {}).get("search_result") is not True:
+        return Observation.missing("requests", source, "search_result not requested; searches cannot be counted")
+    results = data.get("web_search")
+    return Observation(value=1 if isinstance(results, list) and results else 0, unit="requests", source=source)
+
+
+def _observations(config: ModelConfiguration, usage: dict[str, Any], *, search: Observation | None = None
+                  ) -> dict[str, Observation]:
     source = "glm usage"
     details = usage.get("prompt_tokens_details")
     cached = details.get("cached_tokens") if isinstance(details, dict) else None
@@ -424,6 +466,8 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
                                                    source=f"{source}: prompt_tokens - cached_tokens")
     else:
         obs["uncached_input_tokens"] = Observation.missing("tokens", source, "input breakdown not reported")
+    if search is not None:
+        obs["web_search_requests"] = search
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -447,5 +491,13 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {key}")
         total += int(tokens) * rate / 1_000_000
+    if (searches := obs.get("web_search_requests")) is not None:
+        if searches.value is None:
+            return Observation.missing("usd", "configuration pricing", "web_search_requests not known")
+        if searches.value:
+            rate = pricing.get("web_search_usd_per_request")
+            if not isinstance(rate, int | float):
+                return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+            total += int(searches.value) * rate
     return Observation(value=round(total, 10), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

@@ -97,6 +97,8 @@ def run_call(
     extra: dict[str, Any] = {}
     if outcome.succeeded and outcome.extracted is not None:
         output, problems, extra = call.parse(outcome.extracted.final_answer)
+        if outcome.extracted.truncated:
+            problems.append("evaluator output was truncated")
         status = "completed" if output is not None and not problems else "invalid_output"
     else:
         status = "failed"

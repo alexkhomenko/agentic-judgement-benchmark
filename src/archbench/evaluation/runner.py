@@ -6,7 +6,8 @@ the same run without replacing completed results and never re-reads policy files
 rubric or policy is a new run.
 
 Automatic stages: validation -> blinded packets -> independent judges -> classification ->
-recommendation extraction -> review selection. Human review import and adjudication are separate operations.
+recommendation extraction -> review selection (attention signals). Human checks of every response, full
+reviews of flagged responses, and adjudication are separate operations.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from ..planning.provenance import dependency_versions
 from ..planning.loader import freeze_file, load_configuration, load_policy, load_rubric
 from ..storage.artifacts import ArtifactIntegrityError, ArtifactStore
 from ..storage.database import Database
+from .checks import RunIndex
 from .extraction import extraction_messages, extraction_packet, parse_extraction
 from .invocations import EvaluationCall, Parser, next_attempt, recover_orphans, run_call
 from .judging import (
@@ -46,7 +48,7 @@ from .judging import (
     structured_messages,
 )
 from .packets import build_packet
-from .records import EVALUATION_CODE_REVISION, effective, read_packet, run_records, selected_attempt
+from .records import EVALUATION_CODE_REVISION, current_adjudications, effective, read_packet, run_records, selected_attempt
 from .review import build_selection, publish_selection, selection_record_id
 from .validation import validate_response
 
@@ -70,7 +72,9 @@ class EvaluationStatus(Frozen):
     classifications: StageCount
     extractions: StageCount
     review_selection: str | None
-    human_reviews: StageCount
+    human_checks: StageCount
+    flagged: int = 0  # responses whose current check has any flag
+    human_reviews: StageCount  # full reviews of responses flagged on a judge or the answer
     adjudications: StageCount
     pending_stages: list[str] = Field(default_factory=list)
 
@@ -513,9 +517,12 @@ def evaluation_status(db: Database, evaluation_run_id: str) -> EvaluationStatus:
         ("packet_id",), max_attempts,
     )
     selection = db.get_record(selection_record_id(run_id))
-    selected = {i["packet_id"] for i in selection.payload["items"]} if selection else set()
+    index = RunIndex.build(db, ctx)
+    states = {p.record_id: index.state(p.record_id) for p in packets}
+    checked = sum(1 for s in states.values() if s in ("approved", "flagged"))
+    needs_review = {p.record_id for p in packets if index.blocking(p.record_id)}
     reviewed = {r.payload["packet_id"] for r in effective(run_records(db, RecordKind.HUMAN_REVIEW, exp, run_id))}
-    adjudications = effective(run_records(db, RecordKind.ADJUDICATION, exp, run_id))
+    adjudications = current_adjudications(db, exp, run_id)
 
     pending = []
     if len(validations) < total or len(packets) < answered:
@@ -528,7 +535,9 @@ def evaluation_status(db: Database, evaluation_run_id: str) -> EvaluationStatus:
         pending.append("recommendation_extraction")
     if selection is None:
         pending.append("review_selection")
-    if selection is None or selected - reviewed:
+    if selection is None or checked < len(packets):
+        pending.append("human_check")
+    if needs_review - reviewed:
         pending.append("human_review")
     if len(adjudications) < len(packets) or selection is None:
         pending.append("adjudication")
@@ -541,7 +550,9 @@ def evaluation_status(db: Database, evaluation_run_id: str) -> EvaluationStatus:
         classifications=classifications,
         extractions=extractions,
         review_selection=selection.record_id if selection else None,
-        human_reviews=StageCount(done=len(selected & reviewed), expected=len(selected)),
+        human_checks=StageCount(done=checked, expected=len(packets)),
+        flagged=sum(1 for s in states.values() if s == "flagged"),
+        human_reviews=StageCount(done=len(needs_review & reviewed), expected=len(needs_review)),
         adjudications=StageCount(done=len(adjudications), expected=len(packets)),
         pending_stages=pending,
     )

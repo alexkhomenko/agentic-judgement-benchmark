@@ -120,6 +120,39 @@ def test_aliases_are_rejected_so_the_answering_model_is_pinned() -> None:
     report = adapter.qualify(alias, QualificationRequirements(
         baseline_prompt_chars=1, longest_follow_up_chars=1, output_budget_tokens=None, requires_continuation=False))
     assert {c.name: c.passed for c in report.checks}["pinned_model"] is False
+    assert not report.probes
+
+
+@pytest.mark.parametrize(("model", "answer", "passed"), [
+    ("jev-1.14.0", {"type": "noul", "noul": 0.99}, True),
+    ("jev-1.13.0", {"type": "noul", "noul": 0.99}, False),
+    ("jev-1.14.0", {"type": "noul", "noul": "yes"}, False),
+    ("jev-1.14.0", {"type": "noul", "noul": 1.1}, False),
+    ("jev-1.14.0", {}, False),
+])
+def test_qualification_verifies_version_by_typed_response_not_alias_listing(
+    model: str, answer: dict[str, Any], passed: bool,
+) -> None:
+    rec = Recorder(ok({"model": model, "answers": {"identity_check": answer},
+                       "usage": {"input_tokens": 30, "output_tokens": 4}}))
+    report = ts_adapter(rec).qualify(CONFIG, QualificationRequirements(
+        baseline_prompt_chars=1, longest_follow_up_chars=0, output_budget_tokens=None, requires_continuation=False))
+    assert report.passed is passed
+    (request,) = rec.requests
+    assert request.method == "POST" and str(request.url).endswith("/v1/systemone")
+    assert json.loads(request.content)["model"] == "jev-1.14.0"
+    assert report.probes[0]["cost_incurred"] == "yes"
+    assert report.probes[0]["cost_usd"] == pytest.approx(30 * .042 / 1e6)
+    assert TS_KEY not in json.dumps(report.probes)
+
+
+def test_invalid_parameters_never_send_paid_qualification_probes() -> None:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["temperature"] = {"state": "explicit", "value": 0}
+    rec = Recorder(ok(jev_response()))
+    report = ts_adapter(rec).qualify(ModelConfiguration.model_validate(data), QualificationRequirements(
+        baseline_prompt_chars=1, longest_follow_up_chars=0, output_budget_tokens=None, requires_continuation=False))
+    assert not report.passed and not report.probes and not rec.requests
 
 
 def test_structured_answers_map_onto_the_classification_schema() -> None:

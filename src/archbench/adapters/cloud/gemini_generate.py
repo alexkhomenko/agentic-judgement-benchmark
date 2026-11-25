@@ -13,14 +13,34 @@ Configuration parameters (all others are rejected at qualification):
     thinking_level     explicit or omitted  -> generationConfig.thinkingConfig.thinkingLevel
     include_thoughts   explicit or omitted  -> generationConfig.thinkingConfig.includeThoughts
     temperature        explicit or omitted  -> generationConfig.temperature
+    web_search         explicit or omitted  -> tools: [value] (Grounding with Google Search, sent verbatim:
+                                               {google_search: {}} or its camelCase form {googleSearch: {...}})
 adapter_options:
     api_version: v1 (default) | v1beta     base_url: https://generativelanguage.googleapis.com
     timeout_s: <float> (default 600)
     pricing: {input_usd_per_mtok, output_usd_per_mtok, cached_input_usd_per_mtok?,
-              long_context?: {threshold_input_tokens, <same rate keys>}, source, verified_on}
+              long_context?: {threshold_input_tokens, <same rate keys>}, web_search_usd_per_request?,
+              source, verified_on}
 
 Usage: cached tokens are part of promptTokenCount; billed output is candidates plus thoughts tokens
 ("output price including thinking tokens").
+
+Grounding with Google Search (verified 2026-11-24; https://aistudio.google.com/docs/google-search,
+https://aistudio.google.com/docs/pricing, https://aistudio.google.com/docs/api-reference/generate-content):
+- The model decides whether and how often to search inside one generateContent call. The legacy
+  `google_search_retrieval` tool (dynamic retrieval thresholds, older models) is rejected.
+- Gemini 3 and newer bill per search query the model executes: $14 per 1,000 after 5,000 free per month shared
+  across Gemini 3+ models (the free quota is not modelled: cost is at list price). Empty queries are not billed and
+  queries are counted as unique. Gemini 2.5 and older bill per grounded prompt instead; this adapter records the
+  Gemini 3+ unit, so web_search_usd_per_request is the price of one search query.
+- web_search_requests = unique non-empty `candidates[0].groundingMetadata.webSearchQueries`. With no
+  groundingMetadata it is 0, unless the response shows tool use (toolUsePromptTokenCount, or the undocumented
+  usageMetadata.billedToolCalls), in which case the count is missing and so is the cost. Known gap: a 2026-07
+  forum report says generateContent can omit groundingMetadata when the search ran during thinking.
+- toolUsePromptTokenCount has no documented rate; as before, a non-zero count leaves the cost missing.
+- finishReason TOO_MANY_TOOL_CALLS, or STOP with no final answer text (or ending on a toolCall part), is an
+  incomplete failure. The final answer is the non-thought text parts only; groundingMetadata (sources,
+  supports, search entry point) stays in the native response and is never replayed on continuation.
 """
 
 from __future__ import annotations
@@ -53,7 +73,9 @@ from .wire import CapturingTransport, wire_record
 STATE_FORMAT = "gemini-generate-content-v1"
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 PROBE_MAX_TOKENS = 2048
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "thinking_level", "include_thoughts", "temperature"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "thinking_level", "include_thoughts", "temperature",
+                                  "web_search"})
+SEARCH_TOOL_KEYS = frozenset({"google_search", "googleSearch"})
 # Finish reasons that mean the provider declined or blocked the output.
 REFUSAL_REASONS = frozenset({"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
                              "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION"})
@@ -260,6 +282,12 @@ class GeminiAdapter:
         body: dict[str, Any] = {"contents": contents, "generationConfig": generation}
         if system_instruction is not None:
             body["systemInstruction"] = system_instruction
+        if (web_search := explicit(config, "web_search")) is not None:
+            if (not isinstance(web_search, dict) or len(web_search) != 1 or not SEARCH_TOOL_KEYS.issuperset(web_search)
+                    or not isinstance(next(iter(web_search.values())), dict)):
+                raise AdapterError(FailureKind.INVALID_STATE,
+                                   "web_search must be a Google Search tool definition, e.g. {google_search: {}}")
+            body["tools"] = [copy.deepcopy(web_search)]
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -316,7 +344,9 @@ class GeminiAdapter:
                                CostIncurred.YES)
         data = response.json()
         request_id = data.get("responseId")
-        observations = _observations(config, data.get("usageMetadata") or {})
+        searching = "tools" in body
+        observations = _observations(config, data.get("usageMetadata") or {},
+                                     searches=_searches(data) if searching else None)
 
         def failure(kind: FailureKind, error: dict[str, Any]) -> NativeExecution:
             return NativeExecution(status="failed", native_response=data, request_id=request_id,
@@ -336,6 +366,16 @@ class GeminiAdapter:
         if reason in REFUSAL_REASONS:
             return failure(FailureKind.REFUSAL, {"type": "refusal", "reason": reason,
                                                  "safety_ratings": candidate.get("safetyRatings")})
+        if searching:
+            parts = [p for p in (candidate.get("content") or {}).get("parts") or []
+                     if isinstance(p, dict) and not p.get("thought")]
+            if reason == "TOO_MANY_TOOL_CALLS":
+                return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                            "detail": "server tool loop stopped before a final answer"})
+            ends_on_tool = bool(parts) and ("toolCall" in parts[-1] or "functionCall" in parts[-1])
+            if reason == "STOP" and (ends_on_tool or not any(p.get("text") for p in parts)):
+                return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason,
+                                                            "detail": "response ended without final answer text"})
         if reason not in ("STOP", "MAX_TOKENS"):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "finish_reason", "reason": reason})
         return NativeExecution(status="completed", native_response=data, finish_reason=reason, request_id=request_id,
@@ -404,7 +444,22 @@ def _error_message(response: httpx2.Response) -> str:
     return str(_error(response).get("message") or response.text[:500])
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _searches(data: dict[str, Any]) -> Observation:
+    """Billed Google Search queries (Gemini 3+ unit): unique non-empty groundingMetadata.webSearchQueries."""
+    source = "gemini groundingMetadata.webSearchQueries (unique non-empty; billed per search query, Gemini 3+)"
+    metadata = _candidate(data).get("groundingMetadata")
+    queries = metadata.get("webSearchQueries") if isinstance(metadata, dict) else None
+    if isinstance(queries, list):
+        return Observation(value=len({q for q in queries if isinstance(q, str) and q.strip()}), unit="requests",
+                           source=source)
+    usage = data.get("usageMetadata") or {}
+    if usage.get("toolUsePromptTokenCount") or usage.get("billedToolCalls"):
+        return Observation.missing("requests", source, "tool use reported without webSearchQueries")
+    return Observation(value=0, unit="requests", source=f"{source} (no groundingMetadata)")
+
+
+def _observations(config: ModelConfiguration, usage: dict[str, Any], *, searches: Observation | None = None
+                  ) -> dict[str, Observation]:
     source = "gemini usageMetadata"
     values = {
         "input_tokens": usage.get("promptTokenCount"),
@@ -424,6 +479,8 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
                     source=f"{source}: candidatesTokenCount + thoughtsTokenCount")
         if candidates is not None else Observation.missing("tokens", source, "candidatesTokenCount not reported")
     )
+    if searches is not None:
+        obs["web_search_requests"] = searches
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -457,5 +514,13 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {key}")
         total += tokens * rate / 1_000_000
+    if searches := obs.get("web_search_requests"):
+        if searches.value is None:
+            return Observation.missing("usd", "configuration pricing", "web_search_requests not reported")
+        if searches.value:
+            search_rate = pricing.get("web_search_usd_per_request")
+            if not isinstance(search_rate, int | float):
+                return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+            total += searches.value * search_rate
     return Observation(value=round(total, 8), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

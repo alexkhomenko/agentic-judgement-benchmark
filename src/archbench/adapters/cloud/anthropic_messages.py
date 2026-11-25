@@ -12,11 +12,25 @@ Evidence and control:
 Configuration parameters (all others are rejected at qualification):
     max_output_tokens  explicit, required   -> max_tokens
     effort             explicit or omitted  -> output_config.effort
+    output_format      explicit or omitted  -> output_config.format (structured outputs; the value is sent
+                                               verbatim, e.g. {type: json_schema, schema: {...}})
     thinking           explicit or omitted  -> thinking
+    web_search         explicit or omitted  -> tools: [value] (a server web search tool definition, sent verbatim,
+                                               e.g. {type: web_search_20260209, name: web_search, max_uses: 5})
 adapter_options:
     timeout_s: <float>                       request timeout (default 600)
     pricing: {input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok?,
-              cache_write_usd_per_mtok?, source, verified_on}
+              cache_write_usd_per_mtok?, web_search_usd_per_request?, source, verified_on}
+
+Web search runs server-side inside one request. `usage.server_tool_use.web_search_requests` becomes the
+web_search_requests observation and is priced with web_search_usd_per_request; searches without that rate
+leave the cost unknown. A `pause_turn` stop (the server loop hit its iteration limit) is resumed as the API
+documents: the same request is sent again with the paused assistant content appended (no extra user message),
+up to `adapter_options.pause_turn_max_resumes` times (default 3); still paused after that is an incomplete
+failure. For a resumed turn the native response is the last body with `content` replaced by the whole assistant
+content and `usage` summed over every call, and the earlier raw bodies under `harness_pause_turns`; every
+exchange stays in wire-exchanges.json. The final answer is the text blocks only; search results and citations
+stay in the native response.
 """
 
 from __future__ import annotations
@@ -44,13 +58,14 @@ from ..base import (
     QualificationReport,
     QualificationRequirements,
 )
-from .common import CollectingSink, context_check, explicit, failed
+from .common import CollectingSink, after_failed_resume, context_check, explicit, failed, merge_pause_turns
 from .wire import CapturingTransport, wire_record
 
 STATE_FORMAT = "anthropic-messages-v1"
 PROBE_MAX_TOKENS = 2048
-SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "thinking"})
+SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "effort", "output_format", "thinking", "web_search"})
 TransportFactory = Callable[[], httpx2.BaseTransport]
+DEFAULT_PAUSE_RESUMES = 3
 
 
 class AnthropicAdapter:
@@ -243,10 +258,19 @@ class AnthropicAdapter:
             params["system"] = parent.native_state["system"]
         elif system:
             params["system"] = "\n\n".join(system)
+        output_config: dict[str, Any] = {}
         if (effort := explicit(config, "effort")) is not None:
-            params["output_config"] = {"effort": effort}
+            output_config["effort"] = effort
+        if (output_format := explicit(config, "output_format")) is not None:
+            output_config["format"] = copy.deepcopy(output_format)
+        if output_config:
+            params["output_config"] = output_config
         if (thinking := explicit(config, "thinking")) is not None:
             params["thinking"] = thinking
+        if (web_search := explicit(config, "web_search")) is not None:
+            if not isinstance(web_search, dict) or not str(web_search.get("type", "")).startswith("web_search_"):
+                raise AdapterError(FailureKind.INVALID_STATE, "web_search must be a server web search tool definition")
+            params["tools"] = [copy.deepcopy(web_search)]
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -273,8 +297,62 @@ class AnthropicAdapter:
 
     def _execute(self, config: ModelConfiguration, params: dict[str, Any], transport: CapturingTransport
                  ) -> NativeExecution:
+        resumes = config.adapter_options.get("pause_turn_max_resumes", DEFAULT_PAUSE_RESUMES)
+        if not isinstance(resumes, int) or isinstance(resumes, bool) or resumes < 0:
+            raise AdapterError(FailureKind.INVALID_STATE, "pause_turn_max_resumes must be a non-negative integer")
+        bodies: list[dict[str, Any]] = []
+        current = params
+        while True:
+            outcome = self._call(config, current, transport)
+            if isinstance(outcome, NativeExecution):
+                if not bodies:
+                    return outcome
+                # A resumed call failed: the earlier calls were billed and stay in the evidence.
+                merged = merge_pause_turns(bodies)
+                return outcome.model_copy(update={
+                    "cost_incurred": CostIncurred.YES, "native_response": merged,
+                    "observations": after_failed_resume(
+                        _observations(config, merged["usage"], searching="tools" in params), outcome.cost_incurred),
+                    "error": {**(outcome.error or {}), "after_pause_turns": len(bodies)}})
+            body, request_id = outcome
+            bodies.append(body)
+            if body.get("stop_reason") != "pause_turn" or len(bodies) > resumes or body.get("model") != config.model:
+                break
+            current = {**params, "messages": copy.deepcopy(params["messages"])
+                       + [{"role": "assistant", "content": copy.deepcopy(merge_pause_turns(bodies)["content"])}]}
+        body = merge_pause_turns(bodies)
+        observations = _observations(config, body.get("usage") or {}, searching="tools" in params)
+        if body.get("model") != config.model:
+            return NativeExecution(
+                status="failed", native_response=body, request_id=request_id, cost_incurred=CostIncurred.YES,
+                failure_kind=FailureKind.PROVIDER_ERROR, observations=observations,
+                error={"type": "model_mismatch", "requested": config.model, "served": body.get("model")},
+            )
+        stop_reason = body.get("stop_reason")
+        if stop_reason == "refusal":
+            return NativeExecution(
+                status="failed", native_response=body, request_id=request_id, finish_reason=stop_reason,
+                cost_incurred=CostIncurred.YES, failure_kind=FailureKind.REFUSAL, observations=observations,
+                error={"type": "refusal", "stop_details": body.get("stop_details")},
+            )
+        if stop_reason == "pause_turn":
+            return NativeExecution(
+                status="failed", native_response=body, request_id=request_id, finish_reason=stop_reason,
+                cost_incurred=CostIncurred.YES, failure_kind=FailureKind.PROVIDER_ERROR, observations=observations,
+                error={"type": "incomplete", "detail": f"server tool loop still paused after {resumes} resumes"},
+            )
+        return NativeExecution(
+            status="completed", native_response=body, finish_reason=stop_reason, request_id=request_id,
+            cost_incurred=CostIncurred.YES, observations=observations,
+        )
+
+    def _call(self, config: ModelConfiguration, params: dict[str, Any], transport: CapturingTransport
+              ) -> NativeExecution | tuple[dict[str, Any], str | None]:
+        """One Messages call: the response body and request id, or the failure."""
+        before = len(transport.exchanges)
+
         def dispatched() -> bool:
-            return bool(transport.exchanges)
+            return len(transport.exchanges) > before
 
         try:
             self._client(config, transport).messages.create(**params)
@@ -305,26 +383,7 @@ class AnthropicAdapter:
         if drift:
             raise AdapterError(FailureKind.HARNESS_ERROR, f"SDK changed request fields on the wire: {drift}",
                                CostIncurred.YES)
-        body = json.loads(exchange["response_body"])
-        request_id = exchange["response_headers"].get("request-id")
-        observations = _observations(config, body.get("usage") or {})
-        if body.get("model") != config.model:
-            return NativeExecution(
-                status="failed", native_response=body, request_id=request_id, cost_incurred=CostIncurred.YES,
-                failure_kind=FailureKind.PROVIDER_ERROR, observations=observations,
-                error={"type": "model_mismatch", "requested": config.model, "served": body.get("model")},
-            )
-        stop_reason = body.get("stop_reason")
-        if stop_reason == "refusal":
-            return NativeExecution(
-                status="failed", native_response=body, request_id=request_id, finish_reason=stop_reason,
-                cost_incurred=CostIncurred.YES, failure_kind=FailureKind.REFUSAL, observations=observations,
-                error={"type": "refusal", "stop_details": body.get("stop_details")},
-            )
-        return NativeExecution(
-            status="completed", native_response=body, finish_reason=stop_reason, request_id=request_id,
-            cost_incurred=CostIncurred.YES, observations=observations,
-        )
+        return json.loads(exchange["response_body"]), exchange["response_headers"].get("request-id")
 
     def extract(self, execution: NativeExecution) -> ExtractedResponse:
         body = execution.native_response
@@ -361,7 +420,8 @@ class AnthropicAdapter:
         )
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str, Observation]:
+def _observations(config: ModelConfiguration, usage: dict[str, Any], *, searching: bool = False
+                  ) -> dict[str, Observation]:
     source = "anthropic usage"
     obs: dict[str, Observation] = {}
     for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
@@ -370,6 +430,11 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any]) -> dict[str
                      else Observation.missing("tokens", source, "not reported in usage"))
     # Thinking is billed as output and is included in output_tokens; the API reports no separate count.
     obs["reasoning_tokens"] = Observation.missing("tokens", source, "included in output_tokens; not reported separately")
+    if searching:
+        searches = (usage.get("server_tool_use") or {}).get("web_search_requests")
+        obs["web_search_requests"] = (Observation(value=int(searches), unit="requests", source=source)
+                                      if searches is not None else
+                                      Observation(value=0, unit="requests", source=f"{source} (no server_tool_use)"))
     obs["api_cost_usd"] = _cost(config, obs)
     return obs
 
@@ -396,6 +461,12 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation]) -> Observatio
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {name}")
         total += tokens * rate / 1_000_000
+    if searches := obs.get("web_search_requests"):
+        rate = pricing.get("web_search_usd_per_request")
+        if searches.value:
+            if not isinstance(rate, int | float):
+                return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+            total += searches.value * rate
     return Observation(value=round(total, 8), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")
 

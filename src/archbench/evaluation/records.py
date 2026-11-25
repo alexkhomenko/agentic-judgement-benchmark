@@ -10,7 +10,7 @@ from ..domain.records import Record, RecordKind
 from ..storage.artifacts import ArtifactStore
 from ..storage.database import Database
 
-EVALUATION_CODE_REVISION = "evaluation-v5"  # v5: version digits may follow catalog names (v4: merge duplicate items)
+EVALUATION_CODE_REVISION = "evaluation-v7"  # v7: evidence matching ignores quotation marks anywhere (v6: every response is human-checked; v5: version digits may follow catalog names)
 
 
 def run_records(db: Database, kind: RecordKind, experiment_id: str, run_id: str) -> list[Record]:
@@ -26,6 +26,16 @@ def effective(records: Iterable[Record]) -> list[Record]:
     items = list(records)
     superseded = {r.supersedes for r in items if r.supersedes}
     return [r for r in items if r.record_id not in superseded]
+
+
+WITHDRAWN = "withdrawn"
+
+
+def current_adjudications(db: Database, experiment_id: str, run_id: str) -> list[Record]:
+    """Effective adjudications that carry a score. A withdrawal supersedes an adjudication whose response
+    went back to pending (a new blocking check, or its check went stale) and stands for "no score"."""
+    return [r for r in effective(run_records(db, RecordKind.ADJUDICATION, experiment_id, run_id))
+            if r.payload["basis"] != WITHDRAWN]
 
 
 def packet_ref(db: Database, packet_id: str) -> ArtifactRef:

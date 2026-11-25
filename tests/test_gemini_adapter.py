@@ -145,6 +145,103 @@ def test_cost_counts_cached_input_and_thinking_as_output(tmp_path: Path) -> None
     assert outcome.observations["api_cost_usd"].missing_reason == "no pricing in configuration"
 
 
+SEARCH_TOOL: dict[str, Any] = {"google_search": {}}
+BASE_COST = (900 * 0.30 + 100 * 0.03 + 500 * 2.50) / 1e6
+
+
+def searching_config(**pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def grounded(queries: list[str] | None, *, finish: str = "STOP", **extra: Any) -> dict[str, Any]:
+    body = generated("Answer with a source.", finish=finish, **extra)
+    if queries is not None:
+        body["candidates"][0]["groundingMetadata"] = {
+            "webSearchQueries": queries,
+            "groundingChunks": [{"web": {"uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/x",
+                                         "title": "example.com"}}],
+            "groundingSupports": [{"segment": {"startIndex": 0, "endIndex": 6, "text": "Answer"},
+                                   "groundingChunkIndices": [0]}],
+            "searchEntryPoint": {"renderedContent": "<div>chips</div>"},
+        }
+    return body
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    rec = Recorder(ok(grounded(["q one", "q two", "q one", " "])))  # duplicate and empty queries are not billed
+    outcome, _ = call(tmp_path, rec, config=searching_config(web_search_usd_per_request=0.014))
+    assert json.loads(rec.requests[0].content)["tools"] == [SEARCH_TOOL]
+    assert outcome.succeeded and outcome.extracted.final_answer == "Answer with a source."
+    assert outcome.observations["web_search_requests"].value == 2
+    assert "per search query" in outcome.observations["web_search_requests"].source
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST + 2 * 0.014)
+    outcome, _ = call(tmp_path, Recorder(ok(grounded(["q"]))), config=searching_config())
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, Recorder(ok(grounded(None))), config=searching_config())
+    assert outcome.observations["web_search_requests"].value == 0  # offered but unused: priced as no searches
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(BASE_COST)
+    plain = Recorder(ok(generated()))
+    outcome, _ = call(tmp_path, plain)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(plain.requests[0].content)
+
+
+def test_tool_use_without_reported_queries_leaves_searches_and_cost_missing(tmp_path: Path) -> None:
+    body = grounded(None)
+    body["usageMetadata"]["billedToolCalls"] = [{"tool": "GOOGLE_SEARCH_RETRIEVAL", "successfulToolCallCount": 3}]
+    outcome, _ = call(tmp_path, Recorder(ok(body)), config=searching_config(web_search_usd_per_request=0.014))
+    assert outcome.succeeded and outcome.observations["web_search_requests"].value is None
+    assert outcome.observations["api_cost_usd"].missing_reason == "web_search_requests not reported"
+
+
+@pytest.mark.parametrize("body", [
+    grounded(["q"], finish="TOO_MANY_TOOL_CALLS"),
+    {**grounded(["q"]), "candidates": [{"content": {"role": "model", "parts": [
+        {"toolCall": {"toolType": "GOOGLE_SEARCH_WEB", "id": "t1", "args": {"queries": ["q"]}}}]},
+        "finishReason": "STOP", "index": 0}]},
+    grounded(["q"], signature=None) | {"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]},
+                                                       "finishReason": "STOP", "index": 0}]},
+])
+def test_incomplete_server_tool_loop_is_a_failure(tmp_path: Path, body: dict[str, Any]) -> None:
+    outcome, files = call(tmp_path, Recorder(ok(body)), config=searching_config(web_search_usd_per_request=0.014))
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES and "incomplete" in files["error.json"]
+
+
+def test_truncated_grounded_answer_keeps_truncation_handling(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, Recorder(ok(grounded(["q"], finish="MAX_TOKENS"))), config=searching_config())
+    assert outcome.succeeded and outcome.extracted.truncated
+
+
+def test_grounding_metadata_is_not_replayed_on_continuation(tmp_path: Path) -> None:
+    baseline = grounded(["q"])
+    rec = Recorder(ok(baseline), ok(grounded(None)))
+    adapter, config = rec.adapter(), searching_config(web_search_usd_per_request=0.014)
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, config, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, config, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    sent = json.loads(rec.requests[1].content)
+    assert sent["contents"][1] == baseline["candidates"][0]["content"] and sent["tools"] == [SEARCH_TOOL]
+    assert "groundingMetadata" not in rec.requests[1].content.decode()
+
+
+@pytest.mark.parametrize("value", [
+    {"google_search_retrieval": {"dynamic_retrieval_config": {"mode": "MODE_DYNAMIC", "dynamic_threshold": 0.7}}},
+    {"type": "google_search"},
+    {"google_search": {}, "code_execution": {}},
+    [{"google_search": {}}],
+])
+def test_web_search_value_must_be_a_google_search_tool(value: Any) -> None:
+    data = searching_config().model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = value
+    with pytest.raises(AdapterError, match="Google Search tool"):
+        Recorder(ok(generated())).adapter().prepare(ModelConfiguration.model_validate(data), MESSAGES, None, ctx())
+
+
 @pytest.mark.parametrize(
     ("reply", "kind", "cost"),
     [

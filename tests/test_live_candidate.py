@@ -26,7 +26,7 @@ from archbench.planning.compiler import compile_plan, persist_plan
 from archbench.reporting.report import publish_report
 
 from .conftest import ROOT, Env
-from .test_evaluation import review_all
+from .test_evaluation import check_all
 from .test_typesafe_adapter import TS_KEY, jev_response
 
 API_KEY = "sk-ant-api03-live-candidate-test-0000"
@@ -159,7 +159,7 @@ def test_haiku_debug_experiment_end_to_end(env: Env, tmp_path: Path) -> None:
     assert status.judge_evaluations.done == 8 and status.classifications.done == 2
     judge_models = {b["model"] for b in api.posted() if "<evaluation_packet>" in b["messages"][-1]["content"]}
     assert judge_models == {"claude-haiku-5-5"}
-    review_all(env, run)
+    check_all(env, run)
     ctx = load_run(env.db, run.record_id)
     adjudicate(env.db, run, ctx.policy, ctx.rubric)
     report = publish_report(env.db, env.store, plan.experiment_id, run.record_id)

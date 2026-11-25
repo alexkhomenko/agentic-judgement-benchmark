@@ -21,6 +21,7 @@ adapter_options:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -44,7 +45,7 @@ from ..base import (
 from .wire import CapturingTransport, wire_record
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
-ALIASES = frozenset({"jev", "jev-latest", "jev-preview"})
+PINNED_MODEL = re.compile(r"jev-\d+\.\d+\.\d+")
 TransportFactory = Callable[[], httpx2.BaseTransport]
 
 
@@ -70,45 +71,56 @@ class TypeSafeAdapter:
         if not self._api_key:
             return ("no TypeSafe credentials found: add typesafe.api_key to secrets.local.yaml "
                     "(see secrets.example.yaml) or set TYPESAFE_API_KEY")
-        if config.model in ALIASES:
-            return f"model {config.model!r} is an alias; pin a version such as jev-1.14.0"
+        if PINNED_MODEL.fullmatch(config.model) is None:
+            return f"model {config.model!r} is not a versioned ID; pin a version such as jev-1.14.0"
         return None
 
     # ----- qualification ---------------------------------------------------------------------------
 
     def qualify(self, config: ModelConfiguration, requirements: QualificationRequirements) -> QualificationReport:
         explicit = sorted(n for n, s in config.parameters.items() if s.state is ParameterState.EXPLICIT)
+        probes: list[dict[str, Any]] = []
         checks = [
             QualificationCheck(
                 name="adapter_identity",
                 passed=config.adapter == self.name and config.track is Track.CLOUD and config.provider == "typesafe",
                 detail=f"adapter={config.adapter} track={config.track} provider={config.provider}",
             ),
-            QualificationCheck(name="pinned_model", passed=config.model not in ALIASES,
+            QualificationCheck(name="pinned_model", passed=PINNED_MODEL.fullmatch(config.model) is not None,
                                detail=f"model={config.model}"),
             QualificationCheck(name="parameter_support", passed=not explicit,
                                detail=f"Jev takes no generation parameters; explicit: {explicit}" if explicit else "ok"),
-            self._model_check(config),
         ]
+        checks.append(self._model_check(config, probes) if all(c.passed for c in checks) else
+                      QualificationCheck(name="model_identity", passed=None,
+                                         detail="not evaluated: invalid adapter, version or parameters"))
         if requirements.requires_continuation:
             checks.append(QualificationCheck(name="continuation", passed=False,
                                              detail="Jev is a classifier and has no conversation state"))
-        return QualificationReport.from_checks(config, self.name, requirements, checks)
+        return QualificationReport.from_checks(config, self.name, requirements, checks, probes)
 
-    def _model_check(self, config: ModelConfiguration) -> QualificationCheck:
+    def _model_check(self, config: ModelConfiguration, probes: list[dict[str, Any]]) -> QualificationCheck:
+        """The model listing may contain aliases only; verify the exact version with one tiny paid probe."""
         if not self._api_key:
             return QualificationCheck(name="model_identity", passed=None, detail="not evaluated: no credentials")
-        try:
-            with self._client(config, CapturingTransport(self._transport_factory())) as client:
-                response = client.get("/v1/models")
-            response.raise_for_status()
-            listing = response.json()
-        except (httpx2.HTTPError, ValueError) as exc:
-            return QualificationCheck(name="model_identity", passed=False, detail=f"{type(exc).__name__}: {exc}")
-        models = listing.get("data", listing) if isinstance(listing, dict) else listing
-        names = {m.get("name") or m.get("id") for m in models if isinstance(m, dict)} if isinstance(models, list) else set()
-        return QualificationCheck(name="model_identity", passed=config.model in names,
-                                  detail=f"listed models: {sorted(n for n in names if n)}")
+        body = {"model": config.model, "state": {"value": 2},
+                "questions": {"identity_check": {"type": "noul", "instructions": "Is value equal to 2?"}}}
+        transport = CapturingTransport(self._transport_factory())
+        execution = self._execute(config, body, transport)
+        cost = execution.observations.get("api_cost_usd")
+        probes.append({"step": "identity", "status": execution.status, "request_id": execution.request_id,
+                       "cost_incurred": execution.cost_incurred.value, "cost_usd": cost.value if cost else None,
+                       "error": execution.error, "wire": wire_record(transport.exchanges)})
+        if execution.status != "completed":
+            return QualificationCheck(name="model_identity", passed=False,
+                                      detail=f"typed identity probe failed: {execution.error}")
+        payload = execution.native_response or {}
+        answers = payload.get("answers")
+        answer = answers.get("identity_check") if isinstance(answers, dict) else None
+        value = answer.get("noul") if isinstance(answer, dict) else None
+        valid = isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= 1
+        return QualificationCheck(name="model_identity", passed=valid,
+                                  detail=f"typed probe served {payload.get('model')}; valid noul={valid}")
 
     # ----- invocation ------------------------------------------------------------------------------
 

@@ -12,7 +12,7 @@ import httpx2
 import pytest
 import yaml
 
-from archbench.adapters.base import InvocationContext, QualificationRequirements
+from archbench.adapters.base import AdapterError, InvocationContext, QualificationRequirements
 from archbench.adapters.cloud.xai_responses import XAIAdapter
 from archbench.adapters.fake import FakeAdapter
 from archbench.adapters.fake_judge import FakeJudgeAdapter
@@ -32,7 +32,7 @@ from archbench.storage.artifacts import ArtifactStore
 
 from .conftest import ROOT, Env
 from .test_bias import _read_csv, bias_policy, recommender
-from .test_openai_adapter import response
+from .test_openai_adapter import response, search_call, searched
 
 XAI_KEY = "xai-TestKey0123456789abcdefghij"
 OPENAI_KEY = "sk-proj-should-never-reach-xai-0123456789"
@@ -51,13 +51,39 @@ def grok(text: str = "ok", ticks: int | None = 12_345_678, **kwargs: Any) -> dic
     return body
 
 
+SEARCH_TOOL = {"type": "web_search", "filters": {"excluded_domains": ["example.org"]}}
+CITED = "Use Grok.[[1]](https://example.com/)"
+
+
+def searching_config(**pricing: float) -> ModelConfiguration:
+    data = CONFIG.model_dump(mode="json")
+    data["parameters"]["web_search"] = {"state": "explicit", "value": SEARCH_TOOL}
+    data["adapter_options"]["pricing"].update(pricing)
+    return ModelConfiguration.model_validate(data)
+
+
+def grok_searched(text: str = CITED, *, calls: int | None = 3, ticks: int = 30_000_000, **kwargs: Any
+                  ) -> dict[str, Any]:
+    """Two searches and one page browse (all billed web search calls), then the cited answer."""
+    body = searched(searches=None, text=text, model=MODEL, **kwargs)
+    body["usage"]["cost_in_usd_ticks"] = ticks  # tokens and tool calls together, as xAI documents
+    body["usage"]["num_server_side_tools_used"] = calls or 0
+    if calls is not None:
+        body["usage"]["server_side_tool_usage_details"] = {
+            "web_search_calls": calls, "x_search_calls": 0, "x_posts_fetched": 0, "code_interpreter_calls": 0,
+            "file_search_calls": 0, "mcp_calls": 0, "document_search_calls": 0, "image_generation_calls": 0}
+    return body
+
+
 class MockXAI:
     """Models API (prices in cents per 100M tokens), language-models, and the Responses API."""
 
-    def __init__(self, *, card: dict[str, Any] | None = None, answer: str = "1. **Grok 4.3**: fits.") -> None:
+    def __init__(self, *, card: dict[str, Any] | None = None, answer: str = "1. **Grok 4.3**: fits.",
+                 search: bool = False) -> None:
         self.requests: list[httpx2.Request] = []
         self.card = card or {}
         self.answer = answer
+        self.search = search  # answer with web_search_call items before the message
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
@@ -73,17 +99,19 @@ class MockXAI:
         body = json.loads(request.content)
         last = body["input"][-1]["content"]
         text = last.rsplit(" ", 1)[-1] if last.startswith("Reply with exactly one word") else self.answer
-        return httpx2.Response(200, json=grok(text), headers={"x-request-id": "req_x"})
+        reply = grok_searched(text) if self.search else grok(text)
+        return httpx2.Response(200, json=reply, headers={"x-request-id": "req_x"})
 
     def adapter(self, api_key: str | None = XAI_KEY) -> XAIAdapter:
         return XAIAdapter(api_key=api_key, transport_factory=lambda: httpx2.MockTransport(self))
 
 
-def call(tmp_path: Path, mock: MockXAI, api_key: str | None = XAI_KEY) -> tuple[Any, dict[str, Any]]:
+def call(tmp_path: Path, mock: MockXAI, api_key: str | None = XAI_KEY, *, config: ModelConfiguration = CONFIG
+         ) -> tuple[Any, dict[str, Any]]:
     store = ArtifactStore(tmp_path / "results")
     sink = store.sink(f"calls/{len(list((tmp_path / 'results').glob('calls/*')))}")
     ctx = InvocationContext(experiment_id="e", task_id="t", attempt_id="a", attempt_no=1, round=1)
-    outcome = invoke(mock.adapter(api_key), CONFIG, MESSAGES, None, ctx, sink, fork=False)
+    outcome = invoke(mock.adapter(api_key), config, MESSAGES, None, ctx, sink, fork=False)
     return outcome, {ref.name: store.path(ref.relpath).read_text() for ref in sink.refs}
 
 
@@ -139,6 +167,81 @@ def test_provider_reported_cost_is_recorded_beside_the_configured_price(tmp_path
     assert obs["api_cost_usd"].source == "provider-reported usage.cost_in_usd_ticks"
     # 800 uncached * $1.25/M + 200 cached * $0.20/M + 500 output * $2.50/M
     assert obs["api_cost_usd_configured"].value == pytest.approx((800 * 1.25 + 200 * 0.20 + 500 * 2.50) / 1e6)
+
+
+class Replies(MockXAI):
+    """Answers every Responses API request with the given bodies, in order (the last one repeats)."""
+
+    def __init__(self, *bodies: dict[str, Any]) -> None:
+        super().__init__()
+        self.bodies = list(bodies)
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        body = self.bodies.pop(0) if len(self.bodies) > 1 else self.bodies[0]
+        return httpx2.Response(200, json=body, headers={"x-request-id": "req_x"})
+
+
+def test_web_search_tool_is_sent_verbatim_and_searches_are_counted_without_double_charging(tmp_path: Path) -> None:
+    base = (800 * 1.25 + 200 * 0.20 + 500 * 2.50) / 1e6
+    mock = Replies(grok_searched())
+    outcome, files = call(tmp_path, mock, config=searching_config(web_search_usd_per_request=0.005))
+    assert json.loads(mock.requests[0].content)["tools"] == [SEARCH_TOOL]
+    assert outcome.succeeded and outcome.extracted.final_answer == CITED
+    assert json.loads(files["native-response.json"])["output"][1]["type"] == "web_search_call"
+    obs = outcome.observations
+    assert (obs["web_search_requests"].value, obs["web_search_requests"].source) == (
+        3, "xai usage.server_side_tool_usage_details.web_search_calls")
+    # The ticks already include the tool calls: reported as-is, never topped up with the search rate.
+    assert obs["api_cost_usd"].value == pytest.approx(0.003)
+    assert obs["api_cost_usd_configured"].value == pytest.approx(base + 3 * 0.005)
+    # Missing rate: the configured cross-check is unknown; the provider-reported cost stands.
+    outcome, _ = call(tmp_path, Replies(grok_searched()), config=searching_config())
+    assert outcome.observations["api_cost_usd_configured"].missing_reason == "no price for web_search_requests"
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(0.003)
+    # No usage breakdown: count successful web_search_call items (page browsing is a billed call on xAI).
+    body = grok_searched(calls=None)
+    body["output"].insert(4, search_call(4, status="failed"))
+    outcome, _ = call(tmp_path, Replies(body), config=searching_config(web_search_usd_per_request=0.005))
+    assert outcome.observations["web_search_requests"].value == 3
+    assert "counted from web_search_call" in outcome.observations["web_search_requests"].source
+    # Without ticks, api_cost_usd is the configured price including searches.
+    del body["usage"]["cost_in_usd_ticks"]
+    outcome, _ = call(tmp_path, Replies(body), config=searching_config(web_search_usd_per_request=0.005))
+    assert outcome.observations["api_cost_usd"].value == pytest.approx(base + 3 * 0.005)
+    assert "api_cost_usd_configured" not in outcome.observations
+    # Without the parameter: no tools and no observation.
+    mock = Replies(grok())
+    outcome, _ = call(tmp_path, mock)
+    assert "web_search_requests" not in outcome.observations and "tools" not in json.loads(mock.requests[0].content)
+
+
+def test_unfinished_server_tool_loop_is_an_incomplete_failure(tmp_path: Path) -> None:
+    body = grok_searched()
+    body["output"] = body["output"][:4]  # completed, but no answer after the last search call
+    outcome, _ = call(tmp_path, Replies(body), config=searching_config(web_search_usd_per_request=0.005))
+    assert not outcome.succeeded and outcome.failure_kind is FailureKind.PROVIDER_ERROR
+    assert outcome.cost_incurred is CostIncurred.YES and outcome.observations["api_cost_usd"].value is not None
+
+
+@pytest.mark.parametrize("value", [{"type": "x_search"}, {"type": "web_search_2025_08_26"}, [SEARCH_TOOL]])
+def test_web_search_value_must_be_xai_web_search(value: Any) -> None:
+    data = searching_config().model_dump(mode="json")
+    data["parameters"]["web_search"]["value"] = value
+    ctx = InvocationContext(experiment_id="e", task_id="t", attempt_id="a", attempt_no=1, round=1)
+    with pytest.raises(AdapterError, match="web_search"):
+        MockXAI().adapter().prepare(ModelConfiguration.model_validate(data), MESSAGES, None, ctx)
+
+
+def test_qualification_replays_search_items_statelessly() -> None:
+    mock = MockXAI(search=True)
+    report = mock.adapter().qualify(searching_config(web_search_usd_per_request=0.005), REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    posts = [json.loads(r.content) for r in mock.requests if r.method == "POST"]
+    assert len(posts) == 3 and all(p["tools"] == [SEARCH_TOOL] for p in posts)
+    assert [i["type"] for i in posts[1]["input"][1:6]] == [
+        "reasoning", "web_search_call", "web_search_call", "web_search_call", "message"]
 
 
 def test_missing_output_budget_skips_continuation_probes() -> None:

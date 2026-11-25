@@ -540,7 +540,9 @@ class MlxLmAdapter:
         request = prepared.native_request
         assistant: dict[str, Any] = {"role": "assistant", "content": extracted.final_answer}
         if extracted.reasoning_text is not None:
-            assistant["reasoning_content"] = extracted.reasoning_text
+            tokenizer = ((execution.native_response or {}).get("worker") or {}).get("tokenizer") or {}
+            key = "thinking" if tokenizer.get("response_format") == "harmony" else "reasoning_content"
+            assistant[key] = extracted.reasoning_text
         return ContinuationSnapshot(
             adapter=self.name,
             configuration_key=str(request["repository"]),
@@ -566,6 +568,9 @@ def split_thinking(text: str, tokenizer: dict[str, Any], opened: bool) -> tuple[
     With a thinking block open (see `thinking_block_opened`) and no end marker, the whole completion is
     reasoning (generation stopped while thinking) and the answer is empty.
     """
+    fmt = tokenizer.get("response_format")
+    if fmt in ("harmony", "muse"):
+        return _split_channels(text, fmt)
     start, end = tokenizer.get("think_start"), tokenizer.get("think_end")
     if end and end in text:
         reasoning = text.split(end)[0].rstrip("\n")
@@ -578,6 +583,27 @@ def split_thinking(text: str, tokenizer: dict[str, Any], opened: bool) -> tuple[
     return None, text.strip()
 
 
+def _split_channels(text: str, fmt: str) -> tuple[str | None, str]:
+    """Read only native final/user messages as answers; unfinished analysis stays reasoning."""
+    if fmt == "harmony":
+        pattern = r"(?:<\|start\|>assistant)?<\|channel\|>(analysis|final|commentary)<\|message\|>"
+        final, thought, stops = "final", "analysis", r"<\|(?:end|return|handoff)\|>"
+    else:
+        pattern = r"(?:<\|start\|>assistant)?(?: ?to=(self|user))?<\|message\|>"
+        final, thought, stops = "user", "self", r"<\|(?:eom|eot)\|>"
+    matches = list(re.finditer(pattern, text))
+    reasoning, answers = [], []
+    for index, match in enumerate(matches):
+        channel = match.group(1) or "user"
+        part = text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)]
+        part = re.split(stops, part, maxsplit=1)[0].strip()
+        if channel == thought:
+            reasoning.append(part)
+        elif channel == final:
+            answers.append(part)
+    return ("\n".join(reasoning) if reasoning else None), "\n".join(answers)
+
+
 def thinking_block_opened(data: dict[str, Any], tokenizer: dict[str, Any]) -> bool:
     """Whether the completion starts inside a thinking block.
 
@@ -587,6 +613,9 @@ def thinking_block_opened(data: dict[str, Any], tokenizer: dict[str, Any]) -> bo
     """
     if data.get("thinking_opened"):
         return True
+    if tokenizer.get("response_format") in ("harmony", "muse"):
+        reasoning, _ = _split_channels(str(data.get("completion_text") or ""), tokenizer["response_format"])
+        return reasoning is not None
     start = tokenizer.get("think_start")
     return bool(start) and str(data.get("completion_text") or "").lstrip().startswith(str(start))
 
@@ -598,7 +627,11 @@ def _decoding_check(config: ModelConfiguration, tokenizer: dict[str, Any],
     Thinking is expected only when the tokenizer has thinking markers and the configuration does not disable it.
     """
     problems, notes = [], []
-    thinking_expected = bool(tokenizer.get("think_end")) and explicit(config, "enable_thinking") is not False
+    setting = config.parameters.get("enable_thinking")
+    thinking = explicit(config, "enable_thinking")
+    if thinking is None and setting is not None:
+        thinking = setting.documented_default
+    thinking_expected = bool(tokenizer.get("think_end")) and thinking is not False
     for step, execution, extracted in outputs:
         word = "baseline" if step == "baseline" else step.removeprefix("branch-")
         if extracted is None:

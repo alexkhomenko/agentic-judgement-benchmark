@@ -19,15 +19,41 @@ Configuration parameters (all others are rejected at qualification):
     reasoning_summary  explicit or omitted  -> reasoning.summary
     verbosity          explicit or omitted  -> text.verbosity
     temperature        explicit or omitted  -> temperature
+    web_search         explicit or omitted  -> tools: [value] (a built-in web search tool definition, sent verbatim,
+                                               e.g. {type: web_search}; type web_search or web_search_2025_08_26)
 adapter_options:
     timeout_s: <float>                       request timeout (default 600)
     replay_reasoning: <bool>                 request encrypted reasoning for replay (default true)
     pricing: {input_usd_per_mtok, output_usd_per_mtok, cached_input_usd_per_mtok?,
-              cache_write_30m_usd_per_mtok?, cache_write_12h_usd_per_mtok?,
+              cache_write_30m_usd_per_mtok?, cache_write_12h_usd_per_mtok?, web_search_usd_per_request?,
               long_context?: {threshold_input_tokens, <same rate keys>}, source, verified_on}
 
 Cost assumes cached and cache-write tokens are subsets of `input_tokens`, as the usage breakdown is
 documented. A request beyond the long-context threshold without long-context rates has unknown cost.
+
+Web search (OpenAI docs verified 2026-11-24; sources below). The tool runs server-side inside one response;
+the model decides whether to search (`tool_choice` is not sent, so the API default `auto` applies: "search is
+optional"). With web_search configured:
+- Observation web_search_requests (unit "requests") is the response's top-level
+  `tool_usage.web_search.num_requests`, documented as "counts billable searches. Discounted searches and actions
+  such as opening a page are excluded." If that field is absent, the count falls back to `web_search_call` output
+  items whose action is a search (open_page / find_in_page are not billed) and whose status is not `failed`; the
+  observation's source says which was used. Without web_search the observation is not recorded.
+- Cost: searches x pricing.web_search_usd_per_request (the `web_search` tool is "$10.00 / 1k calls + Search
+  content tokens billed at model rates", i.e. 0.01 per search for every model). Search content tokens are taken
+  to be part of usage.input_tokens. Searches without that rate make api_cost_usd missing, never zero. The legacy
+  `web_search_preview` tool (different rates) is rejected.
+- A response with status `incomplete` for any reason except `max_output_tokens` (e.g. `max_messages`) is a
+  failure, as before. A `completed` response whose server tool calls are unfinished (in_progress / searching /
+  incomplete) or that has no assistant message after its last tool call is an incomplete failure, never a
+  silent partial answer. Truncation keeps its handling. `max_tool_calls` is not sent: past it, extra tool
+  calls "will be ignored" rather than ending the response.
+- The final answer is the assistant message text only. Inline citations the model writes into that text stay
+  in it; url_citation annotations and web_search_call items stay in the native response, and the items are
+  replayed unchanged in continuation (the input item union accepts `web_search_call`).
+Sources: https://developers.openai.com/api/docs/guides/tools-web-search,
+https://developers.openai.com/api/docs/pricing ("Built-in tools"),
+https://developers.openai.com/api/reference/resources/responses/methods/create (`tool_usage`, `web_search_call`).
 """
 
 from __future__ import annotations
@@ -61,7 +87,9 @@ from .wire import CapturingTransport, wire_record
 STATE_FORMAT = "openai-responses-v1"
 PROBE_MAX_TOKENS = 2048
 SUPPORTED_PARAMETERS = frozenset({"max_output_tokens", "reasoning_effort", "reasoning_summary", "verbosity",
-                                  "temperature"})
+                                  "temperature", "web_search"})
+# Server tool calls that have not finished; a completed response carrying one ended its tool loop early.
+UNFINISHED_CALL_STATUSES = frozenset({"in_progress", "searching", "incomplete"})
 TransportFactory = Callable[[], httpx2.BaseTransport]
 
 
@@ -79,6 +107,8 @@ class OpenAIAdapter:
     # its cost is reported as unknown. None: no long-context pricing. Subclasses whose rule depends on the model
     # override `_long_context_guard`.
     long_context_guard_tokens: int | None = 272_000
+    # Accepted `type` values for the web_search parameter (only when "web_search" is a supported parameter).
+    web_search_tool_types: frozenset[str] = frozenset({"web_search", "web_search_2025_08_26"})
 
     def __init__(self, *, api_key: str | None = None, transport_factory: TransportFactory | None = None) -> None:
         # api_key=None lets the SDK resolve credentials from OPENAI_API_KEY.
@@ -278,6 +308,13 @@ class OpenAIAdapter:
             params["text"] = {"verbosity": verbosity}
         if (temperature := explicit(config, "temperature")) is not None:
             params["temperature"] = temperature
+        if (web_search := explicit(config, "web_search")) is not None:
+            if "web_search" not in self.supported_parameters:
+                raise AdapterError(FailureKind.INVALID_STATE, f"{self.name} does not support web_search")
+            if not isinstance(web_search, dict) or web_search.get("type") not in self.web_search_tool_types:
+                raise AdapterError(FailureKind.INVALID_STATE, "web_search must be a built-in web search tool "
+                                   f"definition with type in {sorted(self.web_search_tool_types)}")
+            params["tools"] = [copy.deepcopy(web_search)]
         return PreparedInvocation(
             adapter=self.name,
             messages=messages,
@@ -333,7 +370,9 @@ class OpenAIAdapter:
                                CostIncurred.YES)
         body = json.loads(exchange["response_body"])
         request_id = exchange["response_headers"].get("x-request-id")
-        observations = _observations(config, body.get("usage") or {}, self._long_context_guard(config))
+        searching = "tools" in params
+        observations = _observations(config, body.get("usage") or {}, self._long_context_guard(config),
+                                     searches=self._web_search_requests(body) if searching else None)
 
         def failure(kind: FailureKind, error: dict[str, Any]) -> NativeExecution:
             return NativeExecution(status="failed", native_response=body, request_id=request_id,
@@ -355,6 +394,8 @@ class OpenAIAdapter:
             return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "reason": reason})
         if status not in ("completed", "incomplete"):
             return failure(FailureKind.PROVIDER_ERROR, {"type": "unexpected_status", "status": status})
+        if searching and status == "completed" and (problem := _unfinished_tool_loop(body)):
+            return failure(FailureKind.PROVIDER_ERROR, {"type": "incomplete", "detail": problem})
         return NativeExecution(
             status="completed", native_response=body, finish_reason=_finish_reason(body), request_id=request_id,
             cost_incurred=CostIncurred.YES, observations=observations,
@@ -362,6 +403,17 @@ class OpenAIAdapter:
 
     def _long_context_guard(self, config: ModelConfiguration) -> int | None:
         return self.long_context_guard_tokens
+
+    def _web_search_requests(self, body: dict[str, Any]) -> Observation:
+        """Billable searches in this response: OpenAI's `tool_usage`, else search actions in the output."""
+        reported = ((body.get("tool_usage") or {}).get("web_search") or {}).get("num_requests")
+        if isinstance(reported, int):
+            return Observation(value=reported, unit="requests", source="openai tool_usage.web_search.num_requests")
+        count = sum(1 for i in body.get("output") or [] if i.get("type") == "web_search_call"
+                    and i.get("status") != "failed" and (i.get("action") or {}).get("type", "search") == "search")
+        return Observation(value=count, unit="requests",
+                           source="counted from web_search_call output items with a search action "
+                                  "(tool_usage not reported)")
 
     def _status_failure(self, exc: openai.APIStatusError) -> tuple[FailureKind, CostIncurred]:
         code = _error_code(exc)
@@ -435,8 +487,21 @@ def _finish_reason(body: dict[str, Any]) -> str | None:
     return f"{status}:{reason}" if status == "incomplete" and reason else status
 
 
-def _observations(config: ModelConfiguration, usage: dict[str, Any], long_context_guard_tokens: int | None = 272_000
-                  ) -> dict[str, Observation]:
+def _unfinished_tool_loop(body: dict[str, Any]) -> str | None:
+    """Why a completed response's server tool loop did not reach a final answer, or None."""
+    items = body.get("output") or []
+    pending = [i.get("type") for i in items
+               if str(i.get("type", "")).endswith("_call") and i.get("status") in UNFINISHED_CALL_STATUSES]
+    if pending:
+        return f"server tool calls did not finish: {pending}"
+    tail = [i for i in items if i.get("type") != "reasoning"]
+    if not tail or tail[-1].get("type") != "message":
+        return "server tool loop ended without a final assistant message"
+    return None
+
+
+def _observations(config: ModelConfiguration, usage: dict[str, Any], long_context_guard_tokens: int | None = 272_000,
+                  *, searches: Observation | None = None) -> dict[str, Observation]:
     source = "openai usage"
     details = usage.get("input_tokens_details") or {}
     writes = details.get("cache_write_tokens_details") or {}
@@ -454,11 +519,13 @@ def _observations(config: ModelConfiguration, usage: dict[str, Any], long_contex
         else Observation.missing("tokens", source, "not reported in usage")
         for name, v in values.items()
     }
+    if searches is not None:
+        obs["web_search_requests"] = searches
     configured = _cost(config, obs, long_context_guard_tokens)
     ticks = usage.get("cost_in_usd_ticks")
     if isinstance(ticks, int):
-        # Provider-reported cost (xAI: 1 USD = 10^10 ticks) is the billing record; the configured price table
-        # is kept beside it as a cross-check.
+        # Provider-reported cost (xAI: 1 USD = 10^10 ticks, including server-side tool calls) is the billing
+        # record; the configured price table, searches included, is kept beside it as a cross-check.
         obs["api_cost_usd"] = Observation(value=round(ticks / 1e10, 10), unit="usd",
                                           source="provider-reported usage.cost_in_usd_ticks")
         obs["api_cost_usd_configured"] = configured
@@ -507,5 +574,10 @@ def _cost(config: ModelConfiguration, obs: dict[str, Observation], long_context_
         if not isinstance(rate, int | float):
             return Observation.missing("usd", "configuration pricing", f"no price for {key}")
         total += tokens * rate / 1_000_000
+    if (searches := obs.get("web_search_requests")) and searches.value:
+        rate = pricing.get("web_search_usd_per_request")  # flat per search: no long-context variant
+        if not isinstance(rate, int | float):
+            return Observation.missing("usd", "configuration pricing", "no price for web_search_requests")
+        total += float(searches.value) * rate
     return Observation(value=round(total, 8), unit="usd",
                        source=f"configuration pricing ({pricing.get('source', 'unspecified source')})")

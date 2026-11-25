@@ -15,15 +15,17 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from ..domain.common import content_hash
+from ..domain.execution import observed_spend
 from ..domain.records import Record, RecordKind
-from ..evaluation.records import effective, run_records, selected_attempt
+from ..evaluation.checks import RunIndex
+from ..evaluation.records import current_adjudications, effective, run_records, selected_attempt
 from ..evaluation.review import selection_record_id
 from .bias import bias_tables
 from ..evaluation.runner import EvaluationStatus, RunContext, evaluation_status, load_run
 from ..storage.artifacts import ArtifactStore
 from ..storage.database import Database
 
-REPORTING_POLICY_REVISION = "reporting-v3"  # v3: recommendation-bias section
+REPORTING_POLICY_REVISION = "reporting-v4"  # v4: human checks and their flags (v3: recommendation bias)
 
 
 class ReportInputError(RuntimeError):
@@ -65,6 +67,8 @@ def publish_report(
     sink.write("completion.csv", _csv(tables["completion"]))
     sink.write("leaderboard.csv", _csv(tables["leaderboard"]))
     sink.write("responses.csv", _csv(tables["responses"]))
+    if tables["check_flags"]:
+        sink.write("human-check-flags.csv", _csv(tables["check_flags"]))
     if tables["bias"] is not None:
         sink.write("bias-responses.csv", _csv(tables["bias"]["responses"]))
         sink.write("bias-summary.csv", _csv([_flatten(r) for r in tables["bias"]["summary"]]))
@@ -102,8 +106,9 @@ def _inputs(db: Database, ctx: RunContext) -> dict[str, list[Record]]:
         "judge_evaluation": run_records(db, RecordKind.JUDGE_EVALUATION, exp, run_id),
         "architecture_classification": run_records(db, RecordKind.ARCHITECTURE_CLASSIFICATION, exp, run_id),
         "recommendation_extraction": run_records(db, RecordKind.RECOMMENDATION_EXTRACTION, exp, run_id),
+        "human_check": effective(run_records(db, RecordKind.HUMAN_CHECK, exp, run_id)),
         "human_review": effective(run_records(db, RecordKind.HUMAN_REVIEW, exp, run_id)),
-        "adjudication": effective(run_records(db, RecordKind.ADJUDICATION, exp, run_id)),
+        "adjudication": current_adjudications(db, exp, run_id),
     }
     selection = db.get_record(selection_record_id(run_id))
     inputs["review_selection"] = [selection] if selection else []
@@ -116,6 +121,11 @@ def _inputs(db: Database, ctx: RunContext) -> dict[str, list[Record]]:
 
 
 # ----- tables ----------------------------------------------------------------------------------------
+
+
+def _spend(db: Database, store: ArtifactStore, owner_id: str) -> tuple[float, bool]:
+    ref = db.artifacts_for(owner_id).get("metrics.json")
+    return observed_spend(store.read_json(ref) if ref is not None else None)
 
 
 def _metric(db: Database, store: ArtifactStore, owner_id: str, name: str) -> float | None:
@@ -134,11 +144,12 @@ class CostTally:
         self.unknown = 0
         self.calls = 0
 
-    def add(self, cost_incurred: str, observed_usd: float | None) -> None:
+    def add(self, cost_incurred: str, observed_usd: float | None, complete: bool = True) -> None:
+        """`complete=False`: `observed_usd` is only a billed subtotal, so the call still counts as unknown."""
         self.calls += 1
         if observed_usd is not None:
             self.known += observed_usd
-        elif cost_incurred != "no":
+        if (observed_usd is None or not complete) and cost_incurred != "no":
             self.unknown += 1
 
     def row(self, stage: str) -> dict[str, Any]:
@@ -212,9 +223,9 @@ def build_tables(
         selected_attempts = {e["attempt_id"] for e in got}
         cfg_cost = CostTally()
         for a in attempts:
-            usd = _metric(db, store, a["attempt_id"], "api_cost_usd")
-            (candidate_cost if a["attempt_id"] in selected_attempts else retry_cost).add(a["cost_incurred"], usd)
-            cfg_cost.add(a["cost_incurred"], usd)
+            usd, complete = _spend(db, store, a["attempt_id"])
+            (candidate_cost if a["attempt_id"] in selected_attempts else retry_cost).add(a["cost_incurred"], usd, complete)
+            cfg_cost.add(a["cost_incurred"], usd, complete)
         latencies = [v for e in got if (v := _metric(db, store, e["attempt_id"], "client_wall_ms")) is not None]
 
         failed = blocked = 0
@@ -286,7 +297,7 @@ def build_tables(
     for tally, recs in ((judge_cost, inputs["judge_evaluation"]), (classifier_cost, inputs["architecture_classification"]),
                         (extraction_cost, inputs["recommendation_extraction"])):
         for r in recs:
-            tally.add(r.payload["cost_incurred"], _metric(db, store, r.record_id, "api_cost_usd"))
+            tally.add(r.payload["cost_incurred"], *_spend(db, store, r.record_id))
     for r in inputs["judge_evaluation"]:
         if r.payload.get("status") == "completed" and r.payload.get("provider") == providers.get(str(r.subject_id)):
             self_family += 1
@@ -317,11 +328,32 @@ def build_tables(
             total.row("total measured"),
         ],
         "self_family_judge_evaluations": self_family,
+        "check_flags": _check_flags(db, ctx),
         "bias": bias_tables(
             plan, manifest, inputs["recommendation_extraction"], ctx.catalog,
             ctx.extractor.configuration.provider if ctx.extractor else None,
         ) if ctx.catalog is not None else None,
     }
+
+
+def _check_flags(db: Database, ctx: RunContext) -> list[dict[str, Any]]:
+    """Current human checks that flag something, with the response's identity (reports are not blinded)."""
+    index = RunIndex.build(db, ctx)
+    entries = {e["response_id"]: e for e in ctx.manifest["responses"]}
+    rows = []
+    for packet in index.packets:
+        entry = entries[str(packet.subject_id)]
+        for check in index.current_checks(packet.record_id):
+            if check.payload["flags"]:
+                rows.append({
+                    "configuration": entry["configuration_key"], "repetition": entry["repetition"],
+                    "round": entry["round"], "response_id": entry["response_id"], "packet_id": packet.record_id,
+                    "reviewer": check.payload["reviewer_id"], "flags": " ".join(check.payload["flags"]),
+                    "blocks_scoring": check.payload["blocking"],
+                    "full_review": str(packet.subject_id) in index.reviews,
+                    "note": check.payload["submission"]["note"],
+                })
+    return rows
 
 
 # ----- rendering -------------------------------------------------------------------------------------
@@ -414,7 +446,8 @@ def render_markdown(revision: str, ctx: RunContext, status: EvaluationStatus, ta
         ("Validation", status.validations), ("Blinded packets", status.packets),
         ("Judge evaluations", status.judge_evaluations), ("Architecture classification", status.classifications),
         ("Recommendation extraction", status.extractions),
-        ("Human reviews (selected)", status.human_reviews), ("Adjudications", status.adjudications),
+        ("Human checks", status.human_checks), ("Full human reviews (flagged)", status.human_reviews),
+        ("Adjudications", status.adjudications),
     ):
         lines.append(f"| {label} | {count.done} | {count.expected} | {count.exhausted} |")
     lines += [
@@ -484,6 +517,15 @@ def render_markdown(revision: str, ctx: RunContext, status: EvaluationStatus, ta
                   "|---|---:|---:|---|"]
         for row in tables["missing"]:
             lines.append(f"| {row['configuration']} | {row['repetition']} | {row['round']} | {row['reason']} |")
+    if tables["check_flags"]:
+        lines += ["", "## Human check flags", "",
+                  "A reviewer read each response next to its judgements. These looked wrong. A flag on a judge or on "
+                  "the answer holds the score until a full review; an extraction flag is listed here only.", "",
+                  "| Configuration | Rep | Round | Flags | Full review | Note |", "|---|---:|---:|---|---|---|"]
+        for row in tables["check_flags"]:
+            note = " ".join(str(row["note"]).split()).replace("|", "\\|")
+            lines.append(f"| {row['configuration']} | {row['repetition']} | {row['round']} | {row['flags']} | "
+                         f"{'yes' if row['full_review'] else ('pending' if row['blocks_scoring'] else 'n/a')} | {note} |")
     lines += [
         "",
         "## Notes",

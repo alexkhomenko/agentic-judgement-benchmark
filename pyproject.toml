@@ -26,6 +26,9 @@ bench = "archbench.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+archbench = ["evaluation/review_app.html", "evaluation/selection_review.html"]
+
 [tool.mypy]
 strict = true
 plugins = ["pydantic.mypy"]

@@ -7,6 +7,7 @@ It behaves like a native adapter in the ways the harness must handle:
 - failures can be injected through `adapter_options` for scored invocations only:
     transient_failures: {"<round>": <count>}   first N attempts fail with a transient transport error
     permanent_failure_rounds: [<round>, ...]   provider error, not retryable
+    rate_limited_failures: {"<round>": <count>} first N attempts fail as rate limited
     truncate_rounds: [<round>, ...]             force truncation
 - `style: recommendations` answers any request with a numbered shortlist instead of an architecture:
     recommendation_pool: [<name>, ...]          candidates, earlier names more likely (weights n, n-1, ..., 1)
@@ -180,6 +181,14 @@ class FakeAdapter:
                 status="failed",
                 failure_kind=FailureKind.TRANSIENT_TRANSPORT,
                 error={"type": "connection_reset", "message": "injected transient failure"},
+                cost_incurred=CostIncurred.NO,
+            )
+        limited = opts.get("rate_limited_failures") or {}
+        if isinstance(limited, dict) and ctx.attempt_no <= int(str(limited.get(str(ctx.round), 0))):
+            return NativeExecution(
+                status="failed",
+                failure_kind=FailureKind.RATE_LIMITED,
+                error={"type": "rate_limit", "message": "injected rate limit"},
                 cost_incurred=CostIncurred.NO,
             )
         if ctx.round in _int_list(opts.get("permanent_failure_rounds")):

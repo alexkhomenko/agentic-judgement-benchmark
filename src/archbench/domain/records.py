@@ -1,6 +1,6 @@
 """Append-only derived records with explicit lineage.
 
-Qualification, plans, evaluation runs, validations, packets, judge evaluations, human reviews,
+Qualification, plans, evaluation runs, validations, packets, judge evaluations, human checks and reviews,
 adjudications, classifications, and report revisions all share this envelope.
 """
 
@@ -21,10 +21,23 @@ class RecordKind(StrEnum):
     JUDGE_EVALUATION = "judge_evaluation"
     REVIEW_SELECTION = "review_selection"
     HUMAN_REVIEW = "human_review"
+    HUMAN_CHECK = "human_check"
     ADJUDICATION = "adjudication"
     ARCHITECTURE_CLASSIFICATION = "architecture_classification"
     RECOMMENDATION_EXTRACTION = "recommendation_extraction"
     REPORT_REVISION = "report_revision"
+    SELECTION_EVALUATION_RUN = "selection_evaluation_run"
+    SELECTION_LABELS = "selection_labels"
+    SELECTION_EXTRACTION = "selection_extraction"
+    SELECTION_AUDIT = "selection_audit"
+    SELECTION_REPORT = "selection_report"
+    SELECTION_HUMAN_REVIEW = "selection_human_review"
+    SELECTION_REVIEWED_REPORT = "selection_reviewed_report"
+    CAMPAIGN = "campaign"
+    CAMPAIGN_TARGET = "campaign_target"
+    CAMPAIGN_CELL = "campaign_cell"
+    CAMPAIGN_REVIEW = "campaign_review"
+    CAMPAIGN_REPORT = "campaign_report"
 
 
 class Record(Frozen):

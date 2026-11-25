@@ -6,6 +6,7 @@ streamed debug echo of the body forwarded to Alibaba. Not yet checked against li
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -388,6 +389,37 @@ def test_qualification_rejects_a_second_alibaba_endpoint() -> None:
     assert checks["model_identity"].passed is False and "found 2" in checks["model_identity"].detail
 
 
+def test_endpoint_pin_selects_one_of_multiple_vendor_routes() -> None:
+    config = CONFIG.model_copy(update={"adapter_options": {**CONFIG.adapter_options,
+                                                          "provider_endpoint": "alibaba/us-east-1"}})
+    listing = endpoints()
+    listing["data"]["endpoints"].append({**listing["data"]["endpoints"][0], "tag": "alibaba/us-east-1"})
+    mock = MockOpenRouter(listing=listing)
+    report = mock.adapter().qualify(config, REQUIREMENTS)
+    assert report.passed, report.checks
+    assert report.probes[0]["endpoint"]["tag"] == "alibaba/us-east-1"
+    for request in mock.requests:
+        if request.method == "POST":
+            assert json.loads(request.content)["provider"] == {
+                "only": ["alibaba/us-east-1"], "allow_fallbacks": False, "require_parameters": True}
+    missing = MockOpenRouter(listing=endpoints())
+    check, _ = missing.adapter()._model_check(config, [])
+    assert check.passed is False and "found 0" in check.detail
+    assert all(request.method == "GET" for request in missing.requests)
+
+
+@pytest.mark.parametrize("endpoint", ["novita/us-east-1", "alibaba", "alibaba/", "alibaba/us:fast", 123])
+def test_endpoint_pin_cannot_escape_the_vendor(endpoint: Any) -> None:
+    config = CONFIG.model_copy(update={"adapter_options": {**CONFIG.adapter_options,
+                                                          "provider_endpoint": endpoint}})
+    mock = MockOpenRouter()
+    check, _ = mock.adapter()._model_check(config, [])
+    assert check.passed is False and "provider_endpoint" in check.detail
+    assert not mock.requests
+    with pytest.raises(AdapterError, match="provider_endpoint"):
+        mock.adapter().prepare(config, MESSAGES, None, ctx())
+
+
 def edit_assistant(**fields: Any) -> Any:
     """An echo whose forwarded assistant message has `fields` replaced (None removes the field)."""
     def echo(body: dict[str, Any]) -> dict[str, Any]:
@@ -609,3 +641,566 @@ def test_qwen_through_openrouter_is_attributed_to_alibaba_in_a_p6_run(env: Env) 
     rows = {r["configuration"]: r for r in _read_csv(env, env.db.artifacts_for(report.record_id)["bias-summary.csv"])}
     row = rows["qwen4-max-openrouter@2"]
     assert row["own_vendor"] == "alibaba" and row["own_first.k"] == "2"
+
+
+# ----- Google (Gemini on Google AI Studio) ----------------------------------------------------------------------
+# Mock shaped like the public endpoints listing (read 2026-11-25: one standard Google AI Studio endpoint plus its flex
+# and priority tiers, and Vertex reported as "Google") and like OpenRouter's documented Gemini responses: reasoning as
+# reasoning_details (text, plus thought signatures as reasoning.encrypted, format google-gemini-v1), search usage in
+# usage.server_tool_use_details, citations in message.annotations. The generateContent echo is an assumption that
+# live qualification confirms.
+
+SEARCH_TOOL = {"type": "openrouter:web_search", "parameters": {"engine": "native"}}
+# Inline (tests must not read experiment data): the shape of
+# configs/models/agentic-design-bias-v2{,-search}/google-gemini-4-hydrogen-openrouter.yaml.
+GOOGLE_DATA: dict[str, Any] = {
+    "configuration_id": "v2-google-gemini-4-hydrogen-openrouter", "revision": 1, "track": "cloud",
+    "adapter": "openrouter", "provider": "google", "model": "google/gemini-4-hydrogen",
+    "profile": "native_recommended", "context_limit": 1_048_576,
+    "parameters": {
+        "max_output_tokens": {"state": "explicit", "value": 16000},
+        "reasoning_effort": {"state": "explicit", "value": "high", "documented_default": "high"},
+        "include_thoughts": {"state": "omitted"},
+        "temperature": {"state": "omitted"},
+    },
+    "adapter_options": {
+        "endpoint_model": "gemini-4-hydrogen-20261112", "upstream_model": "gemini-4-hydrogen", "upstream_expect": {},
+        "timeout_s": 900,
+        "pricing": {"input_usd_per_mtok": 1.5, "cached_input_usd_per_mtok": 0.075,
+                    "cache_write_usd_per_mtok": 0.0833333333333333, "output_usd_per_mtok": 7.5,
+                    "source": "openrouter endpoints listing", "verified_on": "2026-11-25"},
+    },
+}
+GOOGLE = ModelConfiguration.model_validate(GOOGLE_DATA)
+GOOGLE_SEARCH = ModelConfiguration.model_validate({
+    **GOOGLE_DATA, "configuration_id": "v2-search-google-gemini-4-hydrogen-openrouter",
+    "parameters": {**GOOGLE_DATA["parameters"], "web_search": {"state": "explicit", "value": SEARCH_TOOL}},
+    "adapter_options": {**GOOGLE_DATA["adapter_options"],
+                        "pricing": {**GOOGLE_DATA["adapter_options"]["pricing"], "web_search_usd_per_request": 0.014}},
+})
+GTHOUGHT = "**Choosing a model** The user wants one pick."
+SIGNATURE = "CsUBAY89a1+thought-signature=="
+CITATION = {"type": "url_citation", "url_citation": {
+    "url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc", "title": "example.com",
+    "content": "x", "start_index": 0, "end_index": 4}}
+
+
+def google_configured(base: ModelConfiguration = GOOGLE, **changes: Any) -> ModelConfiguration:
+    data = base.model_dump(mode="json")
+    for key, value in changes.items():
+        if key in ("upstream_model", "endpoint_model", "upstream_expect", "provider_endpoint"):
+            data["adapter_options"][key] = value
+        elif key == "pricing":
+            data["adapter_options"]["pricing"].update(value)
+        elif key == "parameters":
+            data["parameters"].update(value)
+        else:
+            data[key] = value
+    return ModelConfiguration.model_validate(data)
+
+
+def google_endpoint(tag: str = "google-ai-studio", tier: str | None = None, **changes: Any) -> dict[str, Any]:
+    endpoint = {
+        "name": "Google AI Studio | google/gemini-4-hydrogen-20261112", "provider_name": "Google AI Studio",
+        "tag": tag, "service_tier": tier, "context_length": 1_048_576, "max_completion_tokens": 65_536,
+        "quantization": "unknown", "status": 0, "supports_implicit_caching": False,
+        "pricing": {"prompt": "0.0000015", "completion": "0.0000075", "internal_reasoning": "0.0000075",
+                    "input_cache_read": "0.000000075", "input_cache_write": "0.0000000833333333333333",
+                    "web_search": "0.014", "discount": 0},
+        "supported_parameters": ["reasoning", "include_reasoning", "max_tokens", "temperature", "top_p", "seed",
+                                 "response_format", "tools", "tool_choice", "structured_outputs", "reasoning_effort"],
+        "native_tools": {"openrouter:web_search": {"type": "google_search"}},
+    }
+    endpoint.update(changes)
+    return endpoint
+
+
+def google_endpoints(*extra: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    cheap = {"prompt": "0.00000075", "completion": "0.00000375", "web_search": "0.014"}
+    listed = [google_endpoint(tag="google-ai-studio/flex", tier="flex", pricing=cheap),
+              google_endpoint(**changes),
+              google_endpoint(tag="google-ai-studio/priority", tier="priority"),
+              google_endpoint(tag="google-vertex/global", provider_name="Google",
+                              name="Google | google/gemini-4-hydrogen-20261112"),
+              *extra]
+    return {"data": {"id": "google/gemini-4-hydrogen", "name": "Google: Gemini 4 Hydrogen", "endpoints": listed}}
+
+
+def google_metadata(provider: str = "Google AI Studio", pipeline: list[dict[str, Any]] | None = None
+                    ) -> dict[str, Any]:
+    meta = metadata(provider, "google/gemini-4-hydrogen-20261112")
+    meta["requested"] = "google/gemini-4-hydrogen"
+    if pipeline is not None:
+        meta["pipeline"] = pipeline
+    return meta
+
+
+def gcompletion(text: str = "ok", *, thought: str | None = GTHOUGHT, signature: str | None = SIGNATURE,
+                reasoning_tokens: int | None = 40, searches: int | None = None, annotations: bool = False,
+                finish: str = "stop", native: str = "STOP", tier: str | None = "default",
+                meta: dict[str, Any] | None = None, orchestrated: int | None = None,
+                cost: float | None = 0.0048) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": text, "refusal": None, "reasoning": thought}
+    details = []
+    if thought:
+        details.append({"type": "reasoning.text", "text": thought, "format": "google-gemini-v1", "index": 0})
+    if signature:
+        details.append({"type": "reasoning.encrypted", "data": signature, "id": "tool_0",
+                        "format": "google-gemini-v1", "index": 1})
+    if details:
+        message["reasoning_details"] = details
+    if annotations:
+        message["annotations"] = [CITATION]
+    usage: dict[str, Any] = {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500,
+                             "prompt_tokens_details": {"cached_tokens": 0},
+                             "completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}
+    if cost is not None:
+        usage["cost"] = cost
+    if searches is not None or orchestrated is not None:
+        usage["server_tool_use_details"] = {
+            k: v for k, v in (("web_search_requests", searches), ("tool_calls_requested", orchestrated))
+            if v is not None}
+    body = {"id": "gen-1795000000-google", "object": "chat.completion", "created": 1_795_000_000,
+            "model": "google/gemini-4-hydrogen", "service_tier": tier,
+            "choices": [{"index": 0, "finish_reason": finish, "native_finish_reason": native, "message": message}],
+            "usage": usage, "openrouter_metadata": google_metadata() if meta is None else meta}
+    if tier is None:
+        del body["service_tier"]
+    return body
+
+
+def gemini_echo(body: dict[str, Any]) -> dict[str, Any]:
+    """The generateContent body OpenRouter would forward to Google AI Studio for this request."""
+    contents: list[dict[str, Any]] = []
+    system = None
+    for m in body["messages"]:
+        if m["role"] == "system":
+            system = {"parts": [{"text": m["content"]}]}
+        elif m["role"] == "user":
+            contents.append({"role": "user", "parts": [{"text": m["content"]}]})
+        else:
+            parts: list[dict[str, Any]] = []
+            if m.get("reasoning"):
+                parts.append({"text": m["reasoning"], "thought": True})
+            answer: dict[str, Any] = {"text": m["content"]}
+            signatures = [d["data"] for d in m.get("reasoning_details") or [] if d["type"] == "reasoning.encrypted"]
+            if signatures:
+                answer["thoughtSignature"] = signatures[0]
+            parts.append(answer)
+            contents.append({"role": "model", "parts": parts})
+    generation: dict[str, Any] = {"maxOutputTokens": body["max_tokens"]}
+    if "reasoning" in body:
+        generation["thinkingConfig"] = {"thinkingLevel": body["reasoning"]["effort"]}
+    echo: dict[str, Any] = {"model": "gemini-4-hydrogen", "contents": contents, "generationConfig": generation}
+    if system:
+        echo["systemInstruction"] = system
+    if body.get("tools"):
+        echo["tools"] = [{"googleSearch": {}}]
+    return echo
+
+
+class MockGoogle(MockOpenRouter):
+    def __init__(self, *, searches: int | None = None, annotations: bool = False, signature: str | None = SIGNATURE,
+                 **kwargs: Any) -> None:
+        kwargs.setdefault("echo", gemini_echo)
+        kwargs.setdefault("listing", google_endpoints())
+        kwargs.setdefault("thought", GTHOUGHT)
+        super().__init__(**kwargs)
+        self.searches, self.annotations, self.signature = searches, annotations, signature
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        if request.method == "GET":
+            self.requests.append(request)
+            if request.url.path == "/api/v1/models/google/gemini-4-hydrogen/endpoints":
+                return httpx2.Response(200, json=self.listing)
+            return httpx2.Response(404, json={"error": {"code": 404, "message": "Not found"}})
+        body = json.loads(request.content)
+        if body.get("stream") or self.reply is not None:
+            response = super().__call__(request)
+            if body.get("stream") and self.reply is None and self.stream_reply is None:  # name Google, not Alibaba
+                response = httpx2.Response(200, text=response.text.replace('"Alibaba"', '"Google AI Studio"'),
+                                           headers={"content-type": "text/event-stream"})
+            return response
+        self.requests.append(request)
+        last = body["messages"][-1]["content"]
+        text = last.rsplit(" ", 1)[-1] if "reply with exactly one word" in last.lower() else self.answer
+        searching = "tools" in body
+        return httpx2.Response(200, json=gcompletion(
+            text, thought=self.thought, signature=self.signature, reasoning_tokens=40 if self.thought else 0,
+            searches=self.searches if searching else None, annotations=self.annotations and searching),
+            headers={"x-generation-id": "gen-1795000000-google"})
+
+
+def test_google_request_is_pinned_to_google_ai_studio_with_the_native_default_effort(tmp_path: Path) -> None:
+    mock = MockGoogle(answer="Use Gemini.")
+    outcome, _ = call(tmp_path, mock, GOOGLE)
+    assert outcome.succeeded and outcome.extracted.final_answer == "Use Gemini."
+    assert json.loads(mock.requests[0].content) == {
+        "model": "google/gemini-4-hydrogen", "max_tokens": 16000, "reasoning": {"effort": "high"},
+        "messages": [{"role": "system", "content": "Be precise."}, {"role": "user", "content": "Pick a model."}],
+        "provider": {"only": ["google-ai-studio"], "allow_fallbacks": False, "require_parameters": True},
+    }  # no tools, no sampling, no service tier: the standard AI Studio endpoint only
+    assert "web_search_requests" not in outcome.observations
+    assert outcome.extracted.reasoning_text == GTHOUGHT
+
+
+def test_alibaba_route_is_unchanged_and_cannot_search() -> None:
+    from archbench.adapters.cloud.openrouter_chat import ROUTES
+    assert (ROUTES["alibaba"].slug, ROUTES["alibaba"].name) == ("alibaba", "Alibaba")
+    assert (ROUTES["google"].slug, ROUTES["google"].name) == ("google-ai-studio", "Google AI Studio")
+    searching = configured(parameters={"web_search": {"state": "explicit", "value": SEARCH_TOOL}})
+    with pytest.raises(AdapterError, match="no native web search") as raised:
+        MockOpenRouter().adapter().prepare(searching, MESSAGES, None, ctx())
+    assert raised.value.kind is FailureKind.INVALID_STATE
+    mock = MockOpenRouter()
+    checks = {c.name: c for c in mock.adapter().qualify(searching, REQUIREMENTS).checks}
+    assert checks["parameter_support"].passed is False and all(r.method == "GET" for r in mock.requests)
+
+
+@pytest.mark.parametrize(("body", "error_type"), [
+    (gcompletion(meta=google_metadata("Google")), "provider_mismatch"),  # Vertex
+    (gcompletion(tier="flex"), "tier_mismatch"),
+    (gcompletion(tier="priority"), "tier_mismatch"),
+])
+def test_google_responses_from_another_service_or_tier_are_failures(tmp_path: Path, body: dict[str, Any],
+                                                                    error_type: str) -> None:
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=body)), GOOGLE)
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and error_type in str(outcome.error)
+
+
+def test_google_tier_is_accepted_when_unreported_and_signatures_alone_are_reasoning(tmp_path: Path) -> None:
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=gcompletion(tier=None))), GOOGLE)
+    assert outcome.succeeded
+    signed_only = gcompletion(thought=None)  # reasoning tokens, no text, but a replayable thought signature
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=signed_only)), GOOGLE)
+    assert outcome.succeeded and outcome.extracted.reasoning_text is None
+    neither = gcompletion(thought=None, signature=None)
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=neither)), GOOGLE)
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and "missing_reasoning" in str(outcome.error)
+
+
+@pytest.mark.parametrize("provider_endpoint", ["google-ai-studio/flex", "google-ai-studio/priority",
+                                               "google-vertex/global"])
+def test_google_cannot_be_pinned_to_a_tier_or_another_service(provider_endpoint: str) -> None:
+    with pytest.raises(AdapterError, match="provider_endpoint"):
+        MockGoogle().adapter().prepare(google_configured(provider_endpoint=provider_endpoint), MESSAGES, None, ctx())
+
+
+def test_google_web_search_tool_is_sent_verbatim_and_searches_are_counted_and_priced(tmp_path: Path) -> None:
+    mock = MockGoogle(answer="Gemini, per [1].", searches=2, annotations=True)
+    outcome, files = call(tmp_path, mock, GOOGLE_SEARCH)
+    assert json.loads(mock.requests[0].content)["tools"] == [SEARCH_TOOL]
+    assert outcome.succeeded and outcome.extracted.final_answer == "Gemini, per [1]."  # annotations stay native
+    assert json.loads(files["native-response.json"])["choices"][0]["message"]["annotations"] == [CITATION]
+    obs = outcome.observations
+    assert obs["web_search_requests"].value == 2 and obs["web_search_requests"].unit == "requests"
+    assert "server_tool_use_details.web_search_requests" in obs["web_search_requests"].source
+    assert obs["api_cost_usd"].value == pytest.approx((1000 * 1.5 + 500 * 7.5) / 1e6 + 2 * 0.014)
+    assert obs["openrouter_charge"].value == 0.0048  # recorded beside, includes server tool charges
+    unpriced = google_configured(GOOGLE_SEARCH, pricing={"web_search_usd_per_request": None})
+    outcome, _ = call(tmp_path, MockGoogle(searches=2), unpriced)
+    assert outcome.observations["api_cost_usd"].missing_reason == "no price for web_search_requests"
+    outcome, _ = call(tmp_path, MockGoogle(searches=None), GOOGLE_SEARCH)  # offered but unused
+    assert outcome.observations["web_search_requests"].value == 0
+    assert outcome.observations["api_cost_usd"].value == pytest.approx((1000 * 1.5 + 500 * 7.5) / 1e6)
+    outcome, _ = call(tmp_path, MockGoogle(searches=None, annotations=True), GOOGLE_SEARCH)  # cited, not counted
+    assert outcome.observations["web_search_requests"].value is None
+    assert outcome.observations["api_cost_usd"].missing_reason == "web_search_requests not reported"
+
+
+@pytest.mark.parametrize("body", [
+    gcompletion("", finish="stop", searches=3),  # loop ended without answer text
+    gcompletion("partial", finish="stop", native="TOO_MANY_TOOL_CALLS", searches=3),
+    gcompletion("partial", finish="tool_calls", native="STOP", searches=3),
+    gcompletion("partial", finish="error", native="MALFORMED_FUNCTION_CALL", searches=3),
+])
+def test_google_incomplete_server_tool_loop_is_a_failure(tmp_path: Path, body: dict[str, Any]) -> None:
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=body)), GOOGLE_SEARCH)
+    if body["choices"][0]["finish_reason"] != "error":
+        assert json.loads(str(outcome.error))["type"] == "incomplete"
+    assert not outcome.succeeded and outcome.cost_incurred is CostIncurred.YES
+
+
+@pytest.mark.parametrize("body", [
+    gcompletion("Gemini.", searches=2, orchestrated=2),  # OpenRouter ran the search itself (Exa or another engine)
+    gcompletion("Gemini.", searches=1, meta=google_metadata(pipeline=[
+        {"type": "server_tools", "name": "server-tools", "data": {"mode": "sdk", "tools": ["openrouter:web_search"]}}])),
+])
+def test_google_search_not_run_natively_is_a_failure(tmp_path: Path, body: dict[str, Any]) -> None:
+    outcome, _ = call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=body)), GOOGLE_SEARCH)
+    assert outcome.failure_kind is FailureKind.PROVIDER_ERROR and "search_engine_mismatch" in str(outcome.error)
+    native = gcompletion("Gemini.", searches=1, meta=google_metadata(pipeline=[
+        {"type": "server_tools", "name": "server-tools", "data": {"mode": "native"}}]))
+    assert call(tmp_path, MockGoogle(reply=httpx2.Response(200, json=native)), GOOGLE_SEARCH)[0].succeeded
+
+
+@pytest.mark.parametrize("value", [
+    {"type": "openrouter:web_search"},  # engine-less: auto, falls back to Exa
+    {"type": "openrouter:web_search", "parameters": {}},
+    {"type": "openrouter:web_search", "parameters": {"engine": "auto"}},
+    {"type": "openrouter:web_search", "parameters": {"engine": "exa"}},
+    {"type": "openrouter:web_search", "parameters": {"engine": "native", "allowed_domains": ["example.com"]}},
+    {"type": "openrouter:web_search", "parameters": {"engine": "native", "max_results": 5}},
+    {"type": "web_search_preview"},
+    {"google_search": {}},  # the direct adapter's tool is not an OpenRouter tool
+    "openrouter:web_search",
+])
+def test_google_web_search_must_pin_the_native_engine(value: Any) -> None:
+    config = google_configured(GOOGLE_SEARCH, parameters={"web_search": {"state": "explicit", "value": value}})
+    with pytest.raises(AdapterError) as raised:
+        MockGoogle().adapter().prepare(config, MESSAGES, None, ctx())
+    assert raised.value.kind is FailureKind.INVALID_STATE
+    mock = MockGoogle()
+    checks = {c.name: c for c in mock.adapter().qualify(config, REQUIREMENTS).checks}
+    assert checks["parameter_support"].passed is False and "web_search" in checks["parameter_support"].detail
+    assert checks["upstream_request"].passed is None and all(r.method == "GET" for r in mock.requests)
+
+
+@pytest.mark.parametrize("effort", ["none", "max"])
+def test_google_efforts_that_are_not_thinking_levels_are_rejected(effort: str) -> None:
+    config = google_configured(parameters={"reasoning_effort": {"state": "explicit", "value": effort}})
+    check = next(c for c in MockGoogle().adapter().qualify(config, REQUIREMENTS).checks
+                 if c.name == "parameter_support")
+    assert check.passed is False and effort in check.detail
+
+
+def test_google_continuation_replays_signatures_and_search_annotations_exactly(tmp_path: Path) -> None:
+    mock = MockGoogle(searches=1, annotations=True)
+    adapter = mock.adapter()
+    store = ArtifactStore(tmp_path / "results")
+    snapshot = invoke(adapter, GOOGLE_SEARCH, MESSAGES, None, ctx(), store.sink("base")).snapshot
+    assert snapshot is not None and snapshot.native_state["served_by"] == "Google AI Studio"
+    follow = snapshot.messages + (Message(role=Role.USER, content="Follow-up"),)
+    assert invoke(adapter, GOOGLE_SEARCH, follow, snapshot, ctx(2), store.sink("child")).succeeded
+    first = gcompletion(mock.answer, annotations=True)["choices"][0]["message"]
+    assert json.loads(mock.requests[1].content)["messages"][2] == first  # signatures and annotations included
+
+
+@pytest.mark.parametrize("config", [GOOGLE, GOOGLE_SEARCH])
+def test_google_qualification_checks_the_standard_ai_studio_endpoint_and_the_forwarded_gemini_body(
+        config: ModelConfiguration) -> None:
+    mock = MockGoogle(searches=1, annotations=True)
+    report = mock.adapter().qualify(config, REQUIREMENTS)
+    checks = {c.name: c for c in report.checks}
+    assert report.passed, checks
+    assert report.probes[0]["endpoint"]["tag"] == "google-ai-studio"  # not flex, priority or Vertex
+    detail = checks["upstream_request"].detail
+    assert "forwarded to Google AI Studio" in detail and '"thinkingLevel": "high"' in detail
+    assert "reasoning and reasoning_details" in checks["continuation"].detail
+    echo_probe = next(p for p in report.probes if p["step"] == "upstream-echo")
+    assert echo_probe["upstream_body"]["generationConfig"]["maxOutputTokens"] == 16000
+    baseline = json.loads(mock.requests[1].content)
+    if config is GOOGLE_SEARCH:
+        assert "runs natively as google_search" in checks["model_identity"].detail
+        assert "Google Search grounding forwarded" in detail and "replayed message carried 1 annotations" in detail
+        assert baseline["messages"][-1]["content"].startswith("Search the web")
+    else:
+        assert "googleSearch" not in detail and baseline["messages"][-1]["content"].startswith("Reply with")
+
+
+def without(path: str) -> Any:
+    def echo(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = gemini_echo(body)
+        *parents, last = path.split(".")
+        target = forwarded
+        for key in parents:
+            target = target[key]
+        target.pop(last, None)
+        return forwarded
+    return echo
+
+
+def with_values(**values: Any) -> Any:
+    """gemini_echo with dotted paths (written with __ for dots) set to values."""
+    def echo(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = gemini_echo(body)
+        for dotted, value in values.items():
+            *parents, last = dotted.split("__")
+            target = forwarded
+            for key in parents:
+                target = target.setdefault(key, {})
+            target[last] = value
+        return forwarded
+    return echo
+
+
+def model_parts(**changes: Any) -> Any:
+    def echo(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = gemini_echo(body)
+        for content in forwarded["contents"]:
+            if content["role"] == "model":
+                for part in content["parts"]:
+                    for key, value in changes.items():
+                        if value is None:
+                            part.pop(key, None)
+                        elif key in part:
+                            part[key] = value
+        return forwarded
+    return echo
+
+
+@pytest.mark.parametrize(("echo", "config", "expected"), [
+    (without("tools"), GOOGLE_SEARCH, "web_search configured but 0 Google Search tools"),
+    (with_values(tools=[{"googleSearch": {}}]), GOOGLE, "Google Search tool forwarded although web_search is not"),
+    (with_values(tools=[{"functionDeclarations": [{"name": "web_search"}]}]), GOOGLE_SEARCH,
+     "tools forwarded that the configuration does not request"),  # an OpenRouter-run search offered as a function
+    (with_values(tools=[{"googleSearchRetrieval": {}}]), GOOGLE_SEARCH, "0 Google Search tools"),
+    (with_values(generationConfig__maxOutputTokens=65536), GOOGLE, "maxOutputTokens forwarded as 65536"),
+    (without("generationConfig.maxOutputTokens"), GOOGLE, "no output cap forwarded"),
+    (with_values(generationConfig__temperature=1.0), GOOGLE, "temperature omitted in configuration"),
+    (with_values(generationConfig__topP=0.95), GOOGLE, "top_p omitted in configuration"),
+    (with_values(generationConfig__seed=0), GOOGLE, "generationConfig.seed=0 forwarded"),
+    (with_values(generationConfig__candidateCount=2), GOOGLE, "generationConfig.candidateCount=2 forwarded"),
+    (with_values(generationConfig__thinkingConfig={"thinkingLevel": "medium"}), GOOGLE,
+     "thinkingLevel forwarded as 'medium', configuration implies 'high'"),
+    (with_values(generationConfig__thinkingConfig={"thinkingBudget": 24576}), GOOGLE,
+     "reasoning_effort 'high' configured but no generationConfig.thinkingConfig.thinkingLevel"),
+    (with_values(model="gemini-4-hydrogen-preview"), GOOGLE, "vendor model 'gemini-4-hydrogen-preview'"),
+    (model_parts(thoughtSignature=None), GOOGLE, "thought signatures the baseline returned are not forwarded"),
+    (model_parts(thoughtSignature="CsUBAY89a1+other=="), GOOGLE, "1 of 1 baseline thought signatures"),
+    (model_parts(text="different"), GOOGLE, "replayed answer forwarded as"),
+    (with_values(systemInstruction={"parts": [{"text": "Be brief."}]}), GOOGLE, "system instruction forwarded"),
+])
+def test_google_qualification_rejects_a_forwarded_body_that_departs_from_the_configuration(
+        echo: Any, config: ModelConfiguration, expected: str) -> None:
+    report = MockGoogle(echo=echo).adapter().qualify(config, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is False and expected in check.detail, check.detail
+
+
+def test_google_default_candidate_count_and_openrouter_labels_need_no_pin() -> None:
+    # Seen on every live forwarded body 2026-11-25: candidateCount 1 (Google's default) and a safety_identifier label.
+    echo = with_values(generationConfig__candidateCount=1, labels={"safety_identifier": "abc123"})
+    report = MockGoogle(echo=echo).adapter().qualify(GOOGLE, REQUIREMENTS)
+    assert report.passed, [c for c in report.checks if not c.passed]
+
+
+@pytest.mark.parametrize(("extra", "pin"), [
+    ({"generationConfig__thinkingConfig": {"thinkingLevel": "high", "includeThoughts": True}},
+     {"generationConfig.thinkingConfig.includeThoughts": True}),
+    ({"safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"}]},
+     {"safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"}]}),
+    ({"tools": [{"googleSearch": {"timeRangeFilter": {}}}]}, {"tools": [{"googleSearch": {"timeRangeFilter": {}}}]}),
+])
+def test_google_forwarded_values_the_configuration_does_not_determine_leave_qualification_incomplete(
+        extra: dict[str, Any], pin: dict[str, Any]) -> None:
+    config = GOOGLE_SEARCH
+    report = MockGoogle(echo=with_values(**extra)).adapter().qualify(config, REQUIREMENTS)
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert not report.passed and check.passed is None and "not verified" in check.detail
+    assert next(iter(pin)) in check.detail
+    pinned = google_configured(config, upstream_expect=pin)
+    report = MockGoogle(echo=with_values(**extra)).adapter().qualify(pinned, REQUIREMENTS)
+    assert report.passed, report.checks
+    wrong = google_configured(config, upstream_expect={next(iter(pin)): "something else"})
+    check = next(c for c in MockGoogle(echo=with_values(**extra)).adapter().qualify(wrong, REQUIREMENTS).checks
+                 if c.name == "upstream_request")
+    assert check.passed is False and "upstream_expect" in check.detail
+
+
+def test_google_echo_without_a_model_id_or_with_redacted_signatures_still_verifies() -> None:
+    # Live echoes never carry the model (it is in Google's URL); the pinned dated endpoint identifies it.
+    check = next(c for c in MockGoogle(echo=without("model")).adapter().qualify(GOOGLE, REQUIREMENTS).checks
+                 if c.name == "upstream_request")
+    assert check.passed is True and "identified by the pinned endpoint" in check.detail
+    check = next(c for c in MockGoogle(echo=model_parts(thoughtSignature=HIDDEN)).adapter()
+                 .qualify(GOOGLE, REQUIREMENTS).checks if c.name == "upstream_request")
+    assert check.passed is True and "redacted in OpenRouter's debug echo" in check.detail
+    doubled = model_parts(thoughtSignature=HIDDEN)
+
+    def extra_signature(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = doubled(body)
+        model = next(c for c in forwarded["contents"] if c["role"] == "model")
+        model["parts"].append({"text": "", "thoughtSignature": HIDDEN})
+        return forwarded
+    check = next(c for c in MockGoogle(echo=extra_signature).adapter()
+                 .qualify(GOOGLE, REQUIREMENTS).checks if c.name == "upstream_request")
+    assert check.passed is False and "2 thought signatures forwarded (values redacted)" in check.detail
+
+
+def test_google_omitted_effort_qualifies_with_no_level_or_the_documented_default() -> None:
+    omitted = google_configured(parameters={"reasoning_effort": {"state": "omitted", "documented_default": "high"}})
+    assert MockGoogle().adapter().qualify(omitted, REQUIREMENTS).passed  # no thinkingConfig: Google's default
+    report = MockGoogle(echo=with_values(generationConfig__thinkingConfig={"thinkingLevel": "high"})).adapter() \
+        .qualify(omitted, REQUIREMENTS)
+    assert report.passed, report.checks
+    report = MockGoogle(echo=with_values(generationConfig__thinkingConfig={"thinkingLevel": "medium"})).adapter() \
+        .qualify(omitted, REQUIREMENTS)  # OpenRouter's catalog default_effort for Hydrogen, not Google's
+    assert next(c for c in report.checks if c.name == "upstream_request").passed is False
+
+
+def test_google_echo_that_is_not_a_generate_content_body_is_not_evaluated() -> None:
+    report = MockGoogle(echo=default_echo).adapter().qualify(GOOGLE, REQUIREMENTS)  # an OpenAI-style body
+    check = next(c for c in report.checks if c.name == "upstream_request")
+    assert check.passed is None and "not a Gemini generateContent body" in check.detail
+
+
+@pytest.mark.parametrize(("listing", "config", "expected"), [
+    (google_endpoints(google_endpoint(tag="google-ai-studio/us")), GOOGLE, "found 2"),
+    ({"data": {"id": "google/gemini-4-hydrogen", "endpoints": [google_endpoint(tag="google-ai-studio/flex",
+                                                                               tier="flex")]}},
+     GOOGLE, "found 0"),  # only a tier endpoint: never served by a base-slug request
+    (google_endpoints(native_tools={}), GOOGLE_SEARCH, "searches would use another engine"),
+    (google_endpoints(native_tools={"openrouter:web_search": {"type": "exa"}}), GOOGLE_SEARCH, "'exa'"),
+    (google_endpoints(pricing={**google_endpoint()["pricing"], "web_search": "0.035"}), GOOGLE_SEARCH,
+     "web_search_usd_per_request: configured 0.014, OpenRouter 0.035"),
+    (google_endpoints(pricing={**google_endpoint()["pricing"], "internal_reasoning": "0.00001"}), GOOGLE,
+     "reasoning is costed as output"),
+    (google_endpoints(supported_parameters=["reasoning", "max_tokens"]), GOOGLE_SEARCH,
+     "does not support ['tools']"),
+])
+def test_google_qualification_rejects_endpoint_problems(listing: dict[str, Any], config: ModelConfiguration,
+                                                        expected: str) -> None:
+    mock = MockGoogle(listing=listing)
+    checks = {c.name: c for c in mock.adapter().qualify(config, REQUIREMENTS).checks}
+    assert checks["model_identity"].passed is False and expected in checks["model_identity"].detail, checks
+    assert all(r.method == "GET" for r in mock.requests)  # no paid probe
+
+
+
+def snake_case(body: dict[str, Any]) -> dict[str, Any]:
+    """gemini_echo spelled the other way Gemini's REST API accepts."""
+    def snake(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {re.sub(r"([A-Z])", lambda m: "_" + m.group(1).lower(), k): snake(v) for k, v in value.items()}
+        return [snake(v) for v in value] if isinstance(value, list) else value
+    return snake(gemini_echo(body))  # type: ignore[no-any-return]
+
+
+def test_google_echo_in_snake_case_is_checked_the_same_way() -> None:
+    report = MockGoogle(echo=snake_case, searches=1).adapter().qualify(GOOGLE_SEARCH, REQUIREMENTS)
+    assert report.passed, report.checks
+    echo_probe = next(p for p in report.probes if p["step"] == "upstream-echo")
+    assert "generation_config" in echo_probe["upstream_body"]  # recorded as received
+
+
+def test_google_forwarded_thought_text_must_be_the_baselines() -> None:
+    def split_thought(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = gemini_echo(body)
+        for content in forwarded["contents"]:
+            if content["role"] == "model":
+                head, tail = GTHOUGHT[:10], GTHOUGHT[10:]
+                content["parts"][0:1] = [{"text": head, "thought": True}, {"text": tail + "\n", "thought": True}]
+        return forwarded
+
+    assert MockGoogle(echo=split_thought).adapter().qualify(GOOGLE, REQUIREMENTS).passed
+
+    def other_thought(body: dict[str, Any]) -> dict[str, Any]:
+        forwarded = gemini_echo(body)
+        for content in forwarded["contents"]:
+            if content["role"] == "model":
+                content["parts"][0]["text"] = "Something unrelated."
+        return forwarded
+
+    check = next(c for c in MockGoogle(echo=other_thought).adapter().qualify(GOOGLE, REQUIREMENTS).checks
+                 if c.name == "upstream_request")
+    assert check.passed is False and "forwarded thought text" in check.detail
+
+    def no_thought_text(body: dict[str, Any]) -> dict[str, Any]:  # signatures alone carry Gemini's reasoning
+        forwarded = gemini_echo(body)
+        for content in forwarded["contents"]:
+            if content["role"] == "model":
+                content["parts"] = [p for p in content["parts"] if not p.get("thought")]
+        return forwarded
+
+    assert MockGoogle(echo=no_thought_text).adapter().qualify(GOOGLE, REQUIREMENTS).passed

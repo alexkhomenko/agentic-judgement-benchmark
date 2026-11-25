@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import Field
 
 from ..domain.common import Frozen, content_hash, utc_now
-from ..domain.configuration import ModelConfiguration
+from ..domain.configuration import ModelConfiguration, Track
 from ..domain.plan import ConfigBinding, ExperimentPlan, FrozenFile, RetryPolicy, SchedulingPolicy
 from ..domain.records import Record, RecordKind
 from ..storage.artifacts import ArtifactStore
@@ -71,12 +71,22 @@ def find_qualification(db: Database, config_key: str, config_sha256: str, scenar
     return matches[-1] if matches else None
 
 
+# v2 compares current cloud models only; local checkpoints have older training cutoffs.
+V2_SCENARIO_PREFIX = "agentic-design-bias-v2-"
+
+
 def compile_plan(experiment_path: Path, *, base: Path, db: Database) -> ExperimentPlan:
     loaded = load_experiment(experiment_path, base)
     spec = loaded.spec
     scenario, scenario_files = load_scenario(base / spec.scenario, base)
     rubric, rubric_file = load_rubric(base / spec.rubric, base)
     scenario_sha = content_hash(scenario)
+
+    if scenario.scenario_id.startswith(V2_SCENARIO_PREFIX):
+        local = [config.key for config, _ in loaded.configurations if config.track is Track.LOCAL]
+        if local:
+            raise PlanError("agentic-design-bias v2 excludes local models (older training cutoffs make their "
+                            "answers incomparable with cloud models): " + ", ".join(local))
 
     bindings: list[ConfigBinding] = []
     unqualified: list[str] = []

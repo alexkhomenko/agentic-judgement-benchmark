@@ -74,6 +74,25 @@ def versions() -> dict[str, str | None]:
     return found
 
 
+def thinking_metadata(tokenizer: Any, model_type: str) -> dict[str, Any]:
+    """Native channel formats are not inferred by mlx-lm's generic thinking-tag detector."""
+    formats = {
+        "gpt_oss": ("harmony", "<|channel|>analysis<|message|>",
+                    "<|end|><|start|>assistant<|channel|>final<|message|>"),
+        "muse_glimmer": ("muse", " to=self<|message|>",
+                         "<|eom|><|start|>assistant to=user<|message|>"),
+    }
+    native = formats.get(model_type)
+    if native:
+        fmt, start, end = native
+        return {"response_format": fmt, "think_start": start, "think_end": end,
+                "think_start_token_ids": list(tokenizer.encode(start, add_special_tokens=False)),
+                "think_end_token_ids": list(tokenizer.encode(end, add_special_tokens=False))}
+    return {"response_format": "thinking_tags", "think_start": tokenizer.think_start,
+            "think_end": tokenizer.think_end, "think_start_token_ids": list(tokenizer.think_start_tokens or ()),
+            "think_end_token_ids": list(tokenizer.think_end_tokens or ())}
+
+
 class Engine:
     def __init__(self) -> None:
         self.model: Any = None
@@ -152,10 +171,7 @@ class Engine:
                 "class": type(tokenizer._tokenizer).__name__,
                 "eos_token_ids": sorted(int(t) for t in tokenizer.eos_token_ids),
                 "bos_token": tokenizer.bos_token,
-                "think_start": tokenizer.think_start,
-                "think_end": tokenizer.think_end,
-                "think_start_token_ids": list(tokenizer.think_start_tokens or ()),
-                "think_end_token_ids": list(tokenizer.think_end_tokens or ()),
+                **thinking_metadata(tokenizer, config.get("model_type", "")),
                 "chat_template_sha256": hashlib.sha256(template.encode()).hexdigest() if template else None,
             },
             "generation_config_present": "generation_config.json" in files,

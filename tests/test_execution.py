@@ -182,6 +182,61 @@ def test_exhausted_baseline_blocks_follow_ups_and_rerun_adds_no_attempts(env: En
     assert again.attempts == 3
 
 
+def test_rate_limits_wait_and_do_not_consume_attempts_when_backoff_is_configured(env: Env) -> None:
+    cfg = env.config("limited", adapter_options={"rate_limited_failures": {"1": 4}})
+    plan = env.plan(env.experiment("exp-backoff", [cfg], repetitions=1,
+                                   retry={"max_attempts": 2, "rate_limit_backoff_s": [60, 120, 300, 300, 300]}))
+    waits: list[float] = []
+    summary = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert summary.task_status == {"succeeded": 4}
+    assert waits == [60, 120, 300, 300]  # four rate limits, then the fifth attempt succeeds
+    tid = task_id_for(plan.experiment_id, plan.configurations[0].configuration.key, 1, 1)
+    assert [a.failure_kind for a in env.db.list_attempts(task_id=tid)][:4] == [FailureKind.RATE_LIMITED] * 4
+
+
+def test_used_up_rate_limit_waits_fail_the_run_but_a_later_run_resumes(env: Env) -> None:
+    cfg = env.config("capped", adapter_options={"rate_limited_failures": {"1": 3}})
+    plan = env.plan(env.experiment("exp-cap", [cfg], repetitions=1, retry={"max_attempts": 1, "rate_limit_backoff_s": [5]}))
+    waits: list[float] = []
+    first = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert first.task_status == {"blocked": 3, "failed": 1} and first.attempts == 2 and waits == [5]
+    failed = [t for t in env.db.list_tasks(plan.experiment_id) if t.status is TaskStatus.FAILED]
+    assert "a later run resumes it" in (failed[0].status_reason or "")
+    second = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert second.task_status == {"succeeded": 4} and waits == [5, 5]
+
+
+def test_backoff_does_not_retry_a_rate_limit_that_retry_on_excludes(env: Env) -> None:
+    cfg = env.config("noretry", adapter_options={"rate_limited_failures": {"1": 3}})
+    plan = env.plan(env.experiment("exp-noretry", [cfg], repetitions=1,
+                                   retry={"retry_on": [], "max_attempts": 1, "rate_limit_backoff_s": [5, 5]}))
+    waits: list[float] = []
+    summary = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert summary.attempts == 1 and waits == [] and summary.task_status == {"blocked": 3, "failed": 1}
+    # A later run does not retry it either.
+    again = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert again.attempts == 1 and waits == []
+
+
+def test_plans_frozen_before_backoff_existed_keep_their_hash(env: Env) -> None:
+    from archbench.domain.plan import ExperimentPlan
+    plan = env.plan(env.experiment("exp-hash", [env.config("hashed")], repetitions=1))
+    stored = plan.model_dump(mode="json")
+    assert "rate_limit_backoff_s" not in stored["retry"]  # the shape an older plan record has
+    assert ExperimentPlan.model_validate(stored).plan_sha256 == plan.plan_sha256
+    with_backoff = plan.model_copy(update={"retry": plan.retry.model_copy(update={"rate_limit_backoff_s": (5.0,)})})
+    assert with_backoff.model_dump(mode="json")["retry"]["rate_limit_backoff_s"] == [5.0]
+    assert with_backoff.plan_sha256 != plan.plan_sha256
+
+
+def test_without_backoff_rate_limits_consume_attempts_immediately(env: Env) -> None:
+    cfg = env.config("nobackoff", adapter_options={"rate_limited_failures": {"1": 9}})
+    plan = env.plan(env.experiment("exp-nobackoff", [cfg], repetitions=1))
+    waits: list[float] = []
+    summary = Controller(env.db, env.store, env.registry, sleep=waits.append).run(plan)
+    assert summary.attempts == 3 and waits == [] and summary.task_status == {"blocked": 3, "failed": 1}
+
+
 def test_permanent_failure_is_not_retried(env: Env) -> None:
     cfg = env.config("perm", adapter_options={"permanent_failure_rounds": [3]})
     plan = env.plan(env.experiment("exp-perm", [cfg], repetitions=1))
